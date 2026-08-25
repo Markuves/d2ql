@@ -8,6 +8,7 @@ from pathlib import Path
 
 import numpy as np
 import yaml
+from torch.utils.tensorboard import SummaryWriter
 
 logging.basicConfig(
     level=logging.INFO,
@@ -85,6 +86,9 @@ def run_training(config: dict) -> None:
 
     checkpoint_dir = Path(config["training"]["checkpoint_dir"])
     checkpoint_dir.mkdir(parents=True, exist_ok=True)
+    experiment_id = config.get("experiment", {}).get("id", "run")
+    log_dir = Path(config["training"].get("tensorboard_dir", "outputs/tensorboard")) / experiment_id
+    writer = SummaryWriter(log_dir=str(log_dir))
 
     logger.info("Initializing CloudSimEnv...")
     env = CloudSimEnv(config)
@@ -95,6 +99,13 @@ def run_training(config: dict) -> None:
         action_dim=env.action_space.n,
         config=config
     )
+    initial_checkpoint_path = checkpoint_dir / "checkpoint_initial.pt"
+    agent.save(str(initial_checkpoint_path))
+    logger.info("Initial agent checkpoint saved to %s.", initial_checkpoint_path)
+    writer.add_scalar("run/agent_initialized", 1, 0)
+    writer.add_text("run/experiment", experiment_id, 0)
+    writer.add_text("run/checkpoint", str(initial_checkpoint_path), 0)
+    writer.flush()
 
     resume_path = config.get("_resume_path", "")
     if resume_path:
@@ -111,7 +122,18 @@ def run_training(config: dict) -> None:
     )
 
     for episode in range(n_episodes):
-        obs, _ = env.reset()
+        obs, reset_info = env.reset()
+        writer.add_scalar(
+            "workload/window_cloudlets",
+            reset_info.get("window_cloudlets", 0),
+            episode + 1
+        )
+        writer.add_scalar(
+            "workload/window_index",
+            reset_info.get("window_index", -1),
+            episode + 1
+        )
+        writer.flush()
         terminated = False
         truncated = False
         episode_reward = 0.0
@@ -161,6 +183,29 @@ def run_training(config: dict) -> None:
             agent.epsilon,
             reward_manager.get_current_weights()
         )
+        writer.add_scalar("training/episode_reward", episode_reward, episode + 1)
+        writer.add_scalar("training/average_loss", avg_loss, episode + 1)
+        writer.add_scalar("training/epsilon", agent.epsilon, episode + 1)
+        writer.add_scalar(
+            "workload/window_cloudlets",
+            info.get("window_cloudlets", 0),
+            episode + 1
+        )
+        writer.add_scalar(
+            "workload/window_index",
+            info.get("window_index", -1),
+            episode + 1
+        )
+        writer.add_scalar("agent/selected_vm", info.get("last_action", -1), episode + 1)
+        writer.add_scalar("simulation/makespan", info.get("makespan", 0.0), episode + 1)
+        writer.add_scalar("simulation/energy", info.get("energy", 0.0), episode + 1)
+        writer.add_scalar("simulation/cost", info.get("cost", 0.0), episode + 1)
+        writer.add_scalar(
+            "simulation/sla_violations",
+            info.get("sla_violations", 0),
+            episode + 1
+        )
+        writer.flush()
 
         # Periodic checkpoint save 
         if (episode + 1) % eval_every == 0:
@@ -173,6 +218,7 @@ def run_training(config: dict) -> None:
     agent.save(str(final_path))
     logger.info("Training complete. Final checkpoint saved to %s.", final_path)
 
+    writer.close()
     env.close()
 
 

@@ -31,8 +31,8 @@ class CloudSimEnv(gym.Env):
         
         
         # Space specs
-        n_hosts = self.config["datacenter"]["n_cloud_hosts"] + self.config["datacenter"]["n_edge_nodes"]
-        self.state_dim = 3 * n_hosts + 4 # 3*N (cpu, mem, bw) + 4 (q_pending, lambda_t, r_sla, E_t)
+        # Java currently exposes three aggregate metrics.
+        self.state_dim = 3
         
         self.observation_space = spaces.Box(
             low=0.0, high=1.0, shape=(self.state_dim,), dtype=np.float32
@@ -56,7 +56,14 @@ class CloudSimEnv(gym.Env):
         obs_java = self.java_entry.getObservation()  # returns double[]
         obs = np.array(list(obs_java), dtype=np.float32)
 
-        return obs, {}
+        info = {
+            "window_index": self.java_entry.getWindowIndex(),
+            "window_start": self.java_entry.getWindowStart(),
+            "window_end": self.java_entry.getWindowEnd(),
+            "window_cloudlets": self.java_entry.getLoadedCloudlets(),
+            "last_action": self.java_entry.getLastAction(),
+        }
+        return obs, info
 
 
 
@@ -75,7 +82,15 @@ class CloudSimEnv(gym.Env):
         # 4. Reward is computed by RewardManager in main.py using
         #    metrics returned from the simulator — placeholder for now
         reward = 0.0
-        info = {}
+        info = {
+            "window_index": self.java_entry.getWindowIndex(),
+            "window_cloudlets": self.java_entry.getLoadedCloudlets(),
+            "last_action": self.java_entry.getLastAction(),
+            "makespan": self.java_entry.getMakespan(),
+            "energy": self.java_entry.getEnergy(),
+            "cost": self.java_entry.getCost(),
+            "sla_violations": self.java_entry.getSlaViolations(),
+        }
 
         return obs, reward, terminated, truncated, info
 

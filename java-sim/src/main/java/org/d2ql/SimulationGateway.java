@@ -1,4 +1,3 @@
-```java
 package org.d2ql;
 
 import org.cloudsimplus.brokers.DatacenterBrokerSimple;
@@ -16,8 +15,17 @@ import org.slf4j.LoggerFactory;
 import py4j.GatewayServer;
 
 import java.net.InetAddress;
+import java.io.BufferedReader;
+import java.io.IOException;
+import java.io.InputStream;
+import java.io.InputStreamReader;
+import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.nio.file.Paths;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.zip.GZIPInputStream;
 
 public class SimulationGateway {
 
@@ -26,8 +34,20 @@ public class SimulationGateway {
     // Simulation state held at instance level, reset() rebuilds it
     private CloudSimPlus simulation;
     private DatacenterBrokerSimple broker;
+    private int loadedCloudlets;
+    private int normalizedPesCloudlets;
+    private boolean simulationFinished;
+    private int windowIndex = -1;
+    private double windowStart;
+    private double windowEnd;
+    private List<Cloudlet> windowCloudlets = new ArrayList<>();
+    private List<VmSimple> vms = new ArrayList<>();
+    private int lastAction = -1;
+    private double lastMakespan;
+    private double lastEnergy;
+    private double lastCost;
+    private int lastSlaViolations;
 
-    // Placeholder constants — these will be driven by config/dataset later
     private static final int NUM_HOSTS = 4;
     private static final int HOST_PES = 8;
     private static final long HOST_RAM = 16_384;  // MB
@@ -36,6 +56,21 @@ public class SimulationGateway {
     private static final int VM_PES = 2;
     private static final long VM_MIPS = 1000;
     private static final int NUM_VMS = 4;
+    private static final double WORKLOAD_TIME_SCALE = Double.parseDouble(
+        System.getenv().getOrDefault("WORKLOAD_TIME_SCALE", "0.001")
+    );
+    private static final double WORKLOAD_MIPS = Double.parseDouble(
+        System.getenv().getOrDefault("WORKLOAD_MIPS", "1000")
+    );
+    private static final double WINDOW_DURATION = Double.parseDouble(
+        System.getenv().getOrDefault("WINDOW_DURATION", "60000")
+    );
+    private static final int MAX_CLOUDLETS_PER_WINDOW = Integer.parseInt(
+        System.getenv().getOrDefault("MAX_CLOUDLETS_PER_WINDOW", "10000")
+    );
+    private static final double INITIAL_WINDOW_START = Double.parseDouble(
+        System.getenv().getOrDefault("INITIAL_WINDOW_START", "0")
+    );
 
     public SimulationGateway() {
         // Instance is the Py4j entry point; initialization deferred to reset()
@@ -47,6 +82,19 @@ public class SimulationGateway {
     public void reset() {
         logger.info("Resetting simulation environment for new episode.");
         simulation = new CloudSimPlus();
+        simulationFinished = false;
+        loadedCloudlets = 0;
+        normalizedPesCloudlets = 0;
+        windowCloudlets = new ArrayList<>();
+        vms = new ArrayList<>();
+        lastAction = -1;
+        lastMakespan = 0.0;
+        lastEnergy = 0.0;
+        lastCost = 0.0;
+        lastSlaViolations = 0;
+        windowIndex++;
+        windowStart = INITIAL_WINDOW_START + windowIndex * WINDOW_DURATION;
+        windowEnd = windowStart + WINDOW_DURATION;
 
         // Build hosts
         List<HostSimple> hosts = new ArrayList<>();
@@ -62,26 +110,162 @@ public class SimulationGateway {
         new DatacenterSimple(simulation, hosts);
         broker = new DatacenterBrokerSimple(simulation);
 
-        // Submit placeholder VMs — workload submission will be added
-        // once the dataset module is ready
-        List<VmSimple> vms = new ArrayList<>();
         for (int i = 0; i < NUM_VMS; i++) {
             vms.add(new VmSimple(VM_MIPS, VM_PES));
         }
         broker.submitVmList(vms);
 
-        logger.info("Simulation reset complete. {} hosts, {} VMs ready.", NUM_HOSTS, NUM_VMS);
+        String datasetPath = System.getenv().getOrDefault(
+            "DATASET_PATH", "/app/data/workload.csv.gz"
+        );
+        loadWorkload(Paths.get(datasetPath), vms);
+
+        logger.info(
+            "Simulation reset complete. {} hosts, {} VMs and {} Cloudlets ready.",
+            NUM_HOSTS, NUM_VMS, loadedCloudlets
+        );
+        logger.info(
+            "Active workload window {}: [{}..{}), max Cloudlets {}",
+            windowIndex, windowStart, windowEnd, MAX_CLOUDLETS_PER_WINDOW
+        );
     }
 
-    // step() advances the simulation by running it and returning
-    // a basic observation. Action handling and reward calculation will be
-    // wired in once the RL interface and dataset are finalized 
     public double[] step(int action) {
         if (simulation == null) {
             throw new IllegalStateException("Simulation not initialized. Call reset() first.");
         }
-        simulation.start();
+        if (!simulationFinished) {
+            int selectedVm = Math.floorMod(action, vms.size());
+            lastAction = selectedVm;
+            for (Cloudlet cloudlet : windowCloudlets) {
+                cloudlet.setVm(vms.get(selectedVm));
+            }
+            logger.info(
+                "Action {} selected VM {} for {} Cloudlets in window {}",
+                action, selectedVm, windowCloudlets.size(), windowIndex
+            );
+            simulation.start();
+            simulationFinished = true;
+            calculateMetrics();
+        }
         return getObservation();
+    }
+
+    private void calculateMetrics() {
+        lastMakespan = 0.0;
+        for (Cloudlet cloudlet : windowCloudlets) {
+            lastMakespan = Math.max(lastMakespan, cloudlet.getFinishTime());
+        }
+        lastEnergy = lastMakespan * 0.001;
+        lastCost = lastMakespan * windowCloudlets.size() / 1000.0;
+        lastSlaViolations = 0;
+    }
+
+    private void loadWorkload(Path datasetPath, List<VmSimple> vms) {
+        if (!Files.isRegularFile(datasetPath)) {
+            throw new IllegalStateException("Dataset not found: " + datasetPath);
+        }
+
+        try (
+            InputStream fileInput = Files.newInputStream(datasetPath);
+            GZIPInputStream gzipInput = new GZIPInputStream(fileInput);
+            BufferedReader reader = new BufferedReader(
+                new InputStreamReader(gzipInput, StandardCharsets.UTF_8)
+            )
+        ) {
+            String line;
+            int rowNumber = 0;
+            List<Cloudlet> cloudlets = new ArrayList<>();
+
+            while ((line = reader.readLine()) != null) {
+                rowNumber++;
+                if (line.isBlank()) {
+                    continue;
+                }
+
+                String[] columns = line.split(",", -1);
+                if (columns.length < 11) {
+                    throw new IllegalArgumentException(
+                        "Dataset row " + rowNumber + " has " + columns.length
+                            + " columns; expected at least 11"
+                    );
+                }
+
+                double startTime = parseDouble(columns[3], rowNumber, "start_time");
+                if (startTime < windowStart || startTime >= windowEnd) {
+                    continue;
+                }
+                if (loadedCloudlets >= MAX_CLOUDLETS_PER_WINDOW) {
+                    continue;
+                }
+                double endTime = parseDouble(columns[4], rowNumber, "end_time");
+                double cpuUtilization = parseDouble(columns[5], rowNumber, "cpu_utilization");
+                int pes = parsePes(columns[9], rowNumber);
+                double duration = Math.max(0.001, endTime - startTime);
+                long length = Math.max(
+                    1L,
+                    Math.round(duration * WORKLOAD_TIME_SCALE * WORKLOAD_MIPS
+                        * Math.max(0.01, cpuUtilization))
+                );
+
+                CloudletSimple cloudlet = new CloudletSimple(length, pes);
+                cloudlet.setSubmissionDelay(
+                    Math.max(0.0, (startTime - windowStart) * WORKLOAD_TIME_SCALE)
+                );
+                windowCloudlets.add(cloudlet);
+                cloudlets.add(cloudlet);
+                loadedCloudlets++;
+            }
+
+            broker.submitCloudletList(cloudlets);
+            logger.info(
+                "Loaded {} Cloudlets from {} ({} PEs values normalized to VM capacity)",
+                loadedCloudlets, datasetPath, normalizedPesCloudlets
+            );
+        } catch (IOException | NumberFormatException exception) {
+            throw new IllegalStateException("Could not load dataset: " + datasetPath, exception);
+        }
+    }
+
+    private double parseDouble(String value, int rowNumber, String columnName) {
+        try {
+            return Double.parseDouble(value.trim());
+        } catch (NumberFormatException exception) {
+            throw new IllegalArgumentException(
+                "Invalid " + columnName + " at dataset row " + rowNumber + ": " + value,
+                exception
+            );
+        }
+    }
+
+    private int parsePes(String value, int rowNumber) {
+        String normalizedValue = value.trim();
+        int requestedPes;
+
+        try {
+            if (normalizedValue.startsWith(">")) {
+                requestedPes = Integer.parseInt(normalizedValue.substring(1).trim()) + 1;
+            } else {
+                requestedPes = (int) Math.round(Double.parseDouble(normalizedValue));
+            }
+        } catch (NumberFormatException exception) {
+            throw new IllegalArgumentException(
+                "Invalid pes at dataset row " + rowNumber + ": " + value,
+                exception
+            );
+        }
+
+        if (requestedPes < 1) {
+            throw new IllegalArgumentException(
+                "PEs must be positive at dataset row " + rowNumber + ": " + value
+            );
+        }
+
+        int effectivePes = Math.min(requestedPes, VM_PES);
+        if (effectivePes != requestedPes) {
+            normalizedPesCloudlets++;
+        }
+        return effectivePes;
     }
 
     // getObservation() returns a primitive double[] for efficient
@@ -93,14 +277,49 @@ public class SimulationGateway {
         }
         double finishedCloudlets = broker.getCloudletFinishedList().size();
         double createdVms = broker.getVmCreatedList().size();
-        // Placeholder: extend with queue lengths, SLA metrics, etc. once
-        // dataset and reward module are integrated
-        return new double[]{finishedCloudlets, createdVms, 0.0};
+        double pendingCloudlets = Math.max(0.0, loadedCloudlets - finishedCloudlets);
+        return new double[]{finishedCloudlets, createdVms, pendingCloudlets};
+    }
+
+    public int getLastAction() {
+        return lastAction;
+    }
+
+    public double getMakespan() {
+        return lastMakespan;
+    }
+
+    public double getEnergy() {
+        return lastEnergy;
+    }
+
+    public double getCost() {
+        return lastCost;
+    }
+
+    public int getSlaViolations() {
+        return lastSlaViolations;
     }
 
     // isDone() signals episode termination to the Gymnasium wrapper
     public boolean isDone() {
-        return simulation != null && simulation.isTerminationTimeSet();
+        return simulationFinished;
+    }
+
+    public int getWindowIndex() {
+        return windowIndex;
+    }
+
+    public double getWindowStart() {
+        return windowStart;
+    }
+
+    public double getWindowEnd() {
+        return windowEnd;
+    }
+
+    public int getLoadedCloudlets() {
+        return loadedCloudlets;
     }
 
     public static void main(String[] args) {
@@ -132,4 +351,3 @@ public class SimulationGateway {
         }
     }
 }
-```

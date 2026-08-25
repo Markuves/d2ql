@@ -1,7 +1,3 @@
-python-agent/
-data/
+data/workload.csv.gz
 outputs/
 configs/
-.md
-.lock
-pyproject.toml

@@ -1,0 +1,41 @@
+experiment:
+  id: workload_gz_h1
+  hypothesis: H1
+  seed: 42
+
+datacenter:
+  n_cloud_hosts: 4
+  n_edge_nodes: 0
+
+agent:
+  precision: fp32
+  learning_rate: 0.0005
+  gamma: 0.98
+  target_update_freq: 750
+  batch_size: 64
+  replay_buffer_capacity: 100000
+  replay_buffer_warmup: 2000
+  gradient_clip_norm: 10.0
+  epsilon_start: 1.0
+  epsilon_end: 0.05
+  epsilon_decay: 0.995
+  per_alpha: 0.6
+  per_beta_start: 0.4
+  per_beta_end: 1.0
+
+training:
+  n_episodes: 10
+  eval_every_n_episodes: 5
+  checkpoint_dir: outputs/checkpoints
+  tensorboard_dir: outputs/tensorboard
+
+reward:
+  target_utilization: 0.70
+  migration_penalty: 0.10
+  weight_lr: 0.01
+  w_perf_floor: 0.2
+  w_energy_floor: 0.1
+  w_cost_floor: 0.1
+  w_perf_init: 0.4
+  w_energy_init: 0.3
+  w_cost_init: 0.3

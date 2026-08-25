@@ -1,4 +1,3 @@
-```dockerfile
 # Stage 1: Build
 # -DskipTests keeps the build fast and explicit until Java tests are written
 FROM maven:3.9.6-eclipse-temurin-21 AS builder
@@ -66,4 +65,3 @@ ENTRYPOINT ["java", \
   "-XX:+ExitOnOutOfMemoryError", \
   "--enable-native-access=ALL-UNNAMED", \
   "-jar", "gateway.jar"]
-```

@@ -96,7 +96,7 @@ class RewardManager:
             residuals = np.ones_like(residuals) * (target_residual_sum / 3.0)
             
         # Re-add the floors to obtain normalized, bounded weights
-        self.w[0] = residuals[0] + self.w_perf_floor
+        self.w[0] = residuals[0] + self.w_sla_floor
         self.w[1] = residuals[1] + self.w_energy_floor
         self.w[2] = residuals[2] + self.w_cost_floor
 

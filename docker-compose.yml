@@ -9,6 +9,12 @@ services:
     environment:
       # pass GATEWAY_PORT so SimulationGateway reads it from env
       - GATEWAY_PORT=25333
+      - DATASET_PATH=/app/data/workload.csv.gz
+      - WORKLOAD_TIME_SCALE=0.001
+      - WORKLOAD_MIPS=1000
+      - WINDOW_DURATION=60000
+      - MAX_CLOUDLETS_PER_WINDOW=100
+      - INITIAL_WINDOW_START=0
     volumes:
       - ./data:/app/data
     restart: unless-stopped
@@ -42,11 +48,17 @@ services:
     environment:
       - JAVA_HOST=java-sim
       - JAVA_PORT=25333
+      - DATASET_PATH=/app/data/workload.csv.gz
+      - WORKLOAD_TIME_SCALE=0.001
+      - WORKLOAD_MIPS=1000
+      - WINDOW_DURATION=60000
+      - MAX_CLOUDLETS_PER_WINDOW=100
+      - INITIAL_WINDOW_START=0
     volumes:
       - ./configs:/app/configs
       - ./data:/app/data
       #  named volume for outputs instead of a raw bind mount 
-      - outputs:/app/outputs
+      - ./outputs:/app/outputs
     restart: on-failure
     networks:
       - d2ql-net
@@ -56,6 +68,22 @@ services:
       options:
         max-size: "10m"
         max-file: "3"
+
+  tensorboard:
+    build:
+      context: .
+      dockerfile: Dockerfile.python
+    container_name: tensorboard
+    working_dir: /app
+    command: ["uv", "run", "tensorboard", "--logdir", "/app/outputs/tensorboard", "--host", "0.0.0.0", "--port", "6006", "--reload_interval", "2", "--load_fast=false"]
+    ports:
+      - "6006:6006"
+    volumes:
+      - ./outputs:/app/outputs
+    depends_on:
+      - python-agent
+    networks:
+      - d2ql-net
 
 # explicit named network makes topology clear and debuggable 
 networks:
