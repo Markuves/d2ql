@@ -56,9 +56,14 @@ d2ql/
 To build and run this project, you only need to install:
 * [Docker](https://docs.docker.com/get-docker/)
 * [Docker Compose](https://docs.docker.com/compose/install/)
+* [Nvidia Container Toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/latest/install-guide.html)
 
 *Note: You do not need Java, Maven, or Python installed locally. Compilation and package resolution occur automatically inside isolated Docker builds.*
 
+*after nvidia toolkit installation to verify docker can see the CUDA device*
+```bash
+docker run --rm --gpus all nvidia/cuda:12.4.1-base-ubuntu22.04 nvidia-smi
+```
 ---
 
 ## Getting Started

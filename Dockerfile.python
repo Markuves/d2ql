@@ -3,20 +3,23 @@
 # Install build tools and resolve dependencies here so the runtime image
 # never contains compilers or build headers [1][16][18][26]
 # =============================================================================
-FROM python:3.12-slim AS builder
+FROM nvidia/cuda:12.4.1-devel-ubuntu22.04 AS builder
 
 # PYTHONDONTWRITEBYTECODE prevents .pyc files from being written,
 # PYTHONUNBUFFERED ensures logs are sent directly to stdout/stderr
 # without buffering — critical for Docker log capture [2][3]
 ENV PYTHONDONTWRITEBYTECODE=1 \
-    PYTHONUNBUFFERED=1
+    PYTHONUNBUFFERED=1 \
+    DEBIAN_FRONTEND=noninteractive \
+    UV_PYTHON_INSTALL_DIR=/app/.venv-python
 
 WORKDIR /app
 
-# Install build-essential only in the builder stage so it never
-# reaches the runtime image [1][16][19][26]
+# Install build-essential and tools needed by uv to manage standalone Python
 RUN apt-get update && apt-get install -y --no-install-recommends \
     build-essential \
+    ca-certificates \
+    curl \
     && rm -rf /var/lib/apt/lists/*
 
 # Copy uv binary from the official image [12]
@@ -30,18 +33,24 @@ COPY pyproject.toml uv.lock ./
 # Install all dependencies into a virtual environment inside the builder [12][16]
 # --frozen ensures the lockfile is respected exactly [12]
 # --no-install-project skips installing the d2ql package itself at this stage
-RUN uv sync --frozen --no-install-project
+RUN uv python install 3.12 && \
+    uv sync --frozen --no-install-project --link-mode=copy
 
 # =============================================================================
 # Stage 2: Runtime
 # Start from a clean slim image — no compilers, no build tools [1][2][18][19]
 # =============================================================================
-FROM python:3.12-slim
+FROM nvidia/cuda:12.4.1-runtime-ubuntu22.04
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
-    PYTHONUNBUFFERED=1
+    PYTHONUNBUFFERED=1 \
+    DEBIAN_FRONTEND=noninteractive
 
 WORKDIR /app
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
 
 # create a dedicated non-root user before copying any files [1][2][3][8]
 # Running as root inside a container gives an attacker full container
@@ -56,9 +65,10 @@ RUN groupadd --system d2ql && \
 # Copy the uv binary into the runtime image so `uv run` works [12]
 COPY --from=ghcr.io/astral-sh/uv:latest /uv /uvx /bin/
 
-# Copy the fully resolved virtual environment from the builder stage [12][16][17]
+# Copy the standalone Python binaries and resolved virtual environment from builder stage [12][16][17]
 # Only the installed packages are copied — no compilers, no pip cache [1][16][26]
-COPY --from=builder /app/.venv /app/.venv
+COPY --chown=d2ql:d2ql --from=builder /app/.venv-python /app/.venv-python
+COPY --chown=d2ql:d2ql --from=builder /app/.venv /app/.venv
 
 # Make the virtual environment the active Python for all subsequent commands [16][17]
 ENV PATH="/app/.venv/bin:$PATH" \
@@ -80,4 +90,4 @@ EXPOSE 6006
 #  provide a default CMD so the image is runnable standalone [1][4]
 # docker-compose.yml overrides this with the --config argument,
 # but `docker run python-agent` will work without extra flags [4]
-CMD ["uv", "run", "python", "main.py"]
+CMD ["python", "main.py"]

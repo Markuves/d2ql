@@ -4,6 +4,8 @@ import torch
 import torch.nn as nn
 import torch.optim as optim
 
+print(torch.cuda.is_available()) 
+
 class QNetwork(nn.Module):
     """Identical neural network template for Online and Target Q-Networks."""
     def __init__(self, state_dim: int, action_dim: int):

@@ -142,3 +142,14 @@ ignore_missing_imports = true  # py4j and cloudsimplus have no stubs
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "--cov=d2ql --cov-report=term-missing"
+# =============================================================================
+# [tool.uv.index] & [tool.uv.sources] — Configuración CUDA para PyTorch [12]
+# Fuerza a uv a instalar PyTorch compilado con soporte CUDA 12.4
+# =============================================================================
+[[tool.uv.index]]
+name = "pytorch-cu124"
+url = "https://download.pytorch.org/whl/cu124"
+explicit = true
+
+[tool.uv.sources]
+torch = { index = "pytorch-cu124" }

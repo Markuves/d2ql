@@ -39,6 +39,13 @@ services:
     build:
       context: .
       dockerfile: Dockerfile.python
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
     container_name: python-agent
     # condition: service_healthy blocks startup until the
     # health check above passes, not just until the container starts 
