@@ -27,6 +27,8 @@ DEFAULT_CONFIG = {
     },
     "agent": {
         "precision": "32",
+        "hidden_size": 256,
+        "n_hidden_layers": 2,
         "learning_rate": 0.0005,
         "gamma": 0.98,
         "target_update_freq": 750,
@@ -92,25 +94,43 @@ def run_training(config: dict) -> None:
     native_cfg = config.get("native_precision") or {}
     bits_list = native_cfg.get("bits")
     if native_cfg.get("enabled") and bits_list:
-        from d2ql.precision import parse_precision, precision_bits
+        from d2ql.precision import h4_capacity_plan, precision_bits
 
         lr_overrides = native_cfg.get("learning_rate_overrides") or {}
-        for raw in bits_list:
-            name = parse_precision(raw)
+        capacity_cfg = native_cfg.get("capacity") or {}
+        hidden_sizes = capacity_cfg.get("hidden_sizes") or [
+            config["agent"].get("hidden_size", 256)
+        ]
+        n_hidden_layers = int(
+            capacity_cfg.get("n_hidden_layers", config["agent"].get("n_hidden_layers", 2))
+        )
+        max_hidden = capacity_cfg.get("max_hidden_size") or {}
+        plan = h4_capacity_plan(bits_list, hidden_sizes, max_hidden)
+
+        for name, hidden_size in plan:
             bits = precision_bits(name)
             run_config = deepcopy(config)
             run_config["agent"]["precision"] = name
+            run_config["agent"]["hidden_size"] = hidden_size
+            run_config["agent"]["n_hidden_layers"] = n_hidden_layers
             if name in lr_overrides:
                 run_config["agent"]["learning_rate"] = lr_overrides[name]
             elif bits in lr_overrides:
                 run_config["agent"]["learning_rate"] = lr_overrides[bits]
             elif str(bits) in lr_overrides:
                 run_config["agent"]["learning_rate"] = lr_overrides[str(bits)]
+            tag = f"{name}_h{hidden_size}"
             base_ckpt = Path(config["training"]["checkpoint_dir"])
-            run_config["training"]["checkpoint_dir"] = str(base_ckpt / name)
+            run_config["training"]["checkpoint_dir"] = str(base_ckpt / tag)
             experiment_id = config.get("experiment", {}).get("id", "run")
-            run_config.setdefault("experiment", {})["id"] = f"{experiment_id}_{name}"
-            logger.info("H4 native-precision run: %s (%.2f-bit)", name, bits)
+            run_config.setdefault("experiment", {})["id"] = f"{experiment_id}_{tag}"
+            logger.info(
+                "H4 run: %s (%.2f-bit) | hidden %d x %d",
+                name,
+                bits,
+                n_hidden_layers,
+                hidden_size,
+            )
             _run_one_training(run_config)
         return
     _run_one_training(config)

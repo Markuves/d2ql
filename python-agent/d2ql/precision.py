@@ -169,3 +169,35 @@ def project_native_parameters(module: nn.Module) -> None:
 
 def packed_size_mb(n_params: int, name: str) -> float:
     return (n_params * precision_bits(name)) / 8.0 / 1e6
+
+
+def lookup_max_hidden(mapping: dict, name: str):
+    """Resolve max_hidden_size for a precision; YAML keys may be int or str."""
+    if not mapping:
+        return None
+    bits = precision_bits(name)
+    candidates = [name, bits]
+    if name.isdigit():
+        candidates.append(int(name))
+    candidates.append(str(bits))
+    for key in candidates:
+        if key in mapping:
+            return int(mapping[key])
+    return None
+
+
+def h4_capacity_plan(bits_list, hidden_sizes, max_hidden_size: dict) -> list[tuple[str, int]]:
+    """
+    Capacity-major schedule: every precision starts at the same hidden width,
+    then larger widths drop higher-precision models.
+    """
+    plan: list[tuple[str, int]] = []
+    for hidden in hidden_sizes:
+        hidden = int(hidden)
+        for raw in bits_list:
+            name = parse_precision(raw)
+            cap = lookup_max_hidden(max_hidden_size, name)
+            if cap is not None and hidden > cap:
+                continue
+            plan.append((name, hidden))
+    return plan

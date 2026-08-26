@@ -109,4 +109,4 @@ This project evaluates the following experimental targets:
 * **H1: Adaptive Reward Weighting:** Tests if a dynamically updating reward weight vector outperforms static weight baselines.
 * **H2: Post-Training Quantization:** Evaluates size and latency optimizations when quantizing PyTorch checkpoints (FP32 to FP16/INT8).
 * **H3: Cross-Workload Generalization:** Evaluates performance degradation when agents are evaluated on scale distributions outside their training scale.
-* **H4: Native Bit-Width Training:** Trains a separate Q-network from scratch at ternary (1.58-bit), 4, 8, 16, and 32 bits (not PTQ, not QAT). The model is that precision from initialization.
+* **H4: Native Bit-Width Training:** Trains Q-networks from scratch at ternary (1.58-bit), 4, 8, 16, and 32 bits (not PTQ, not QAT), starting from a shared hidden width and scaling capacity only for lower precisions.

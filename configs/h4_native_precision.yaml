@@ -3,15 +3,15 @@ experiment:
   hypothesis: "H4"
   seed: 42
   description: >
-    Native bit-width training from initialization. The Q-network is created
-    and updated as a ternary (1.58-bit), 4-bit, 8-bit, 16-bit, or 32-bit
-    model from episode 0. This is not H2 post-training quantization (no
-    FP32 checkpoint is converted after the fact) and not quantization-aware
-    training (no FakeQuantize observers or FP32 shadow weights). INT4/INT8
-    parameters live on a signed integer grid; ternary uses BitNet-style
-    weights in {-1, 0, +1}. Both are re-snapped after every optimizer step.
-    16/32 use the corresponding floating-point dtype for weights, activations,
-    and gradients (no AMP mixed precision).
+    Native bit-width training from initialization, with a shared capacity
+    sweep. Every precision starts at the same hidden width; larger widths
+    drop higher-precision models so they are not trained when they would
+    be too slow. Lower-precision models keep scaling width to test whether
+    extra neurons can match higher-precision quality at lower latency.
+
+    This is not H2 post-training quantization and not quantization-aware
+    training. INT4/INT8 live on a signed integer grid; ternary uses BitNet-style
+    weights in {-1, 0, +1}. 16/32 use native floating-point dtypes (no AMP).
 
 datacenter:
   n_cloud_hosts: 4
@@ -32,6 +32,8 @@ queue:
 
 agent:
   precision: "32"          # overridden per run from native_precision.bits
+  hidden_size: 256         # overridden per run from native_precision.capacity
+  n_hidden_layers: 2
   learning_rate: 0.0005
   gamma: 0.98
   target_update_freq: 750
@@ -74,3 +76,13 @@ native_precision:
     8: 0.0002
     16: 0.0003
     32: 0.0005
+  # Shared starting width, then scale up. Higher precision stops earlier.
+  capacity:
+    hidden_sizes: [256, 512, 1024, 2048, 4096]
+    n_hidden_layers: 2
+    max_hidden_size:
+      32: 256
+      16: 512
+      8: 1024
+      4: 2048
+      ternary: 4096

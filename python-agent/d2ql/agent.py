@@ -19,6 +19,22 @@ logger = logging.getLogger(__name__)
 
 print(torch.cuda.is_available())
 
+def _make_linear(
+    in_features: int,
+    out_features: int,
+    precision: str,
+    quantize_activations: bool,
+) -> nn.Module:
+    if precision in GRID_PRECISIONS:
+        return NativeBitLinear(
+            in_features,
+            out_features,
+            precision=precision,
+            quantize_activations=quantize_activations,
+        )
+    return nn.Linear(in_features, out_features)
+
+
 class QNetwork(nn.Module):
     """Identical neural network template for Online and Target Q-Networks."""
 
@@ -28,25 +44,28 @@ class QNetwork(nn.Module):
         action_dim: int,
         precision: str = "32",
         quantize_activations: bool = True,
+        hidden_size: int = 256,
+        n_hidden_layers: int = 2,
     ):
         super().__init__()
         self.precision = precision
-        if precision in GRID_PRECISIONS:
-            self.network = nn.Sequential(
-                NativeBitLinear(state_dim, 256, precision=precision, quantize_activations=quantize_activations),
-                nn.ReLU(),
-                NativeBitLinear(256, 256, precision=precision, quantize_activations=quantize_activations),
-                nn.ReLU(),
-                NativeBitLinear(256, action_dim, precision=precision, quantize_activations=quantize_activations),
+        self.hidden_size = hidden_size
+        self.n_hidden_layers = n_hidden_layers
+        if n_hidden_layers < 1:
+            raise ValueError("n_hidden_layers must be >= 1")
+        layers: list[nn.Module] = [
+            _make_linear(state_dim, hidden_size, precision, quantize_activations),
+            nn.ReLU(),
+        ]
+        for _ in range(n_hidden_layers - 1):
+            layers.append(
+                _make_linear(hidden_size, hidden_size, precision, quantize_activations)
             )
-        else:
-            self.network = nn.Sequential(
-                nn.Linear(state_dim, 256),
-                nn.ReLU(),
-                nn.Linear(256, 256),
-                nn.ReLU(),
-                nn.Linear(256, action_dim),
-            )
+            layers.append(nn.ReLU())
+        layers.append(
+            _make_linear(hidden_size, action_dim, precision, quantize_activations)
+        )
+        self.network = nn.Sequential(*layers)
 
     def forward(self, state: torch.Tensor) -> torch.Tensor:
         return self.network(state)
@@ -147,26 +166,34 @@ class DDQNAgent:
         self.bits = precision_bits(self.precision_name)
         self.param_dtype = compute_dtype(self.precision_name)
         self.quantize_activations = bool(native_cfg.get("quantize_activations", True))
+        self.hidden_size = int(config["agent"].get("hidden_size", 256))
+        self.n_hidden_layers = int(config["agent"].get("n_hidden_layers", 2))
 
         # Networks live at the configured bit-width from initialization (H4).
         self.online_net = QNetwork(
             state_dim, action_dim,
             precision=self.precision_name,
             quantize_activations=self.quantize_activations,
+            hidden_size=self.hidden_size,
+            n_hidden_layers=self.n_hidden_layers,
         ).to(device=self.device, dtype=self.param_dtype)
         self.target_net = QNetwork(
             state_dim, action_dim,
             precision=self.precision_name,
             quantize_activations=self.quantize_activations,
+            hidden_size=self.hidden_size,
+            n_hidden_layers=self.n_hidden_layers,
         ).to(device=self.device, dtype=self.param_dtype)
         self.update_target_network()
         self.target_net.eval()
 
         n_params = sum(p.numel() for p in self.online_net.parameters())
         logger.info(
-            "Native precision: %s (%.2f-bit) | params: %d | packed size: %.4f MB",
+            "Native precision: %s (%.2f-bit) | hidden: %d x %d | params: %d | packed size: %.4f MB",
             self.precision_name,
             self.bits,
+            self.n_hidden_layers,
+            self.hidden_size,
             n_params,
             packed_size_mb(n_params, self.precision_name),
         )
@@ -270,6 +297,8 @@ class DDQNAgent:
             "epsilon": self.epsilon,
             "precision": self.precision_name,
             "bits": self.bits,
+            "hidden_size": self.hidden_size,
+            "n_hidden_layers": self.n_hidden_layers,
         }, path)
 
     def load(self, path: str) -> None:
