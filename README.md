@@ -35,7 +35,7 @@ The two environments communicate via a Docker bridge network on port `25333`.
 
 ```
 d2ql/
-├── configs/               # YAML experiment configurations (H1, H2, H3)
+├── configs/               # YAML experiment configurations (H1, H2, H3, H4)
 ├── data/                  # Workspace for preprocessed workload traces
 ├── outputs/               # Persistent output directory
 │   ├── checkpoints/       # Saved PyTorch checkpoints (FP32 baseline)
@@ -43,7 +43,7 @@ d2ql/
 ├── java-sim/              # Java simulation backend code
 │   └── src/               # Gateway server source code
 ├── python-agent/          # RL package code
-│   └── d2ql/              # Core modules (env, agent, reward, quantization)
+│   └── d2ql/              # Core modules (env, agent, reward, quantization, precision)
 ├── docker-compose.yml     # Multi-container orchestration config
 ├── Dockerfile.java        # Multi-stage Java compile and runtime build
 └── Dockerfile.python      # Python runtime build utilizing uv package manager
@@ -105,7 +105,8 @@ tensorboard --logdir=outputs/tensorboard
 
 ## Research Hypotheses Under Study
 
-This project evaluates the following three experimental targets:
+This project evaluates the following experimental targets:
 * **H1: Adaptive Reward Weighting:** Tests if a dynamically updating reward weight vector outperforms static weight baselines.
 * **H2: Post-Training Quantization:** Evaluates size and latency optimizations when quantizing PyTorch checkpoints (FP32 to FP16/INT8).
 * **H3: Cross-Workload Generalization:** Evaluates performance degradation when agents are evaluated on scale distributions outside their training scale.
+* **H4: Native Bit-Width Training:** Trains a separate Q-network from scratch at ternary (1.58-bit), 4, 8, 16, and 32 bits (not PTQ, not QAT). The model is that precision from initialization.

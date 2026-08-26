@@ -1,23 +1,53 @@
+import logging
 import random
 import numpy as np
 import torch
 import torch.nn as nn
 import torch.optim as optim
 
-print(torch.cuda.is_available()) 
+from d2ql.precision import (
+    GRID_PRECISIONS,
+    NativeBitLinear,
+    compute_dtype,
+    packed_size_mb,
+    parse_precision,
+    precision_bits,
+    project_native_parameters,
+)
+
+logger = logging.getLogger(__name__)
+
+print(torch.cuda.is_available())
 
 class QNetwork(nn.Module):
     """Identical neural network template for Online and Target Q-Networks."""
-    def __init__(self, state_dim: int, action_dim: int):
+
+    def __init__(
+        self,
+        state_dim: int,
+        action_dim: int,
+        precision: str = "32",
+        quantize_activations: bool = True,
+    ):
         super().__init__()
-        self.network = nn.Sequential(
-            nn.Linear(state_dim, 256),
-            nn.ReLU(),
-            nn.Linear(256, 256),
-            nn.ReLU(),
-            nn.Linear(256, action_dim)
-        )
-        
+        self.precision = precision
+        if precision in GRID_PRECISIONS:
+            self.network = nn.Sequential(
+                NativeBitLinear(state_dim, 256, precision=precision, quantize_activations=quantize_activations),
+                nn.ReLU(),
+                NativeBitLinear(256, 256, precision=precision, quantize_activations=quantize_activations),
+                nn.ReLU(),
+                NativeBitLinear(256, action_dim, precision=precision, quantize_activations=quantize_activations),
+            )
+        else:
+            self.network = nn.Sequential(
+                nn.Linear(state_dim, 256),
+                nn.ReLU(),
+                nn.Linear(256, 256),
+                nn.ReLU(),
+                nn.Linear(256, action_dim),
+            )
+
     def forward(self, state: torch.Tensor) -> torch.Tensor:
         return self.network(state)
 
@@ -112,12 +142,35 @@ class DDQNAgent:
             torch.cuda.manual_seed_all(seed)
 
         
-        # Networks initialization
-        self.online_net = QNetwork(state_dim, action_dim).to(self.device)
-        self.target_net = QNetwork(state_dim, action_dim).to(self.device)
-        self.update_target_network() # Initialize weights identically
+        native_cfg = config.get("native_precision") or {}
+        self.precision_name = parse_precision(config["agent"].get("precision", "32"))
+        self.bits = precision_bits(self.precision_name)
+        self.param_dtype = compute_dtype(self.precision_name)
+        self.quantize_activations = bool(native_cfg.get("quantize_activations", True))
+
+        # Networks live at the configured bit-width from initialization (H4).
+        self.online_net = QNetwork(
+            state_dim, action_dim,
+            precision=self.precision_name,
+            quantize_activations=self.quantize_activations,
+        ).to(device=self.device, dtype=self.param_dtype)
+        self.target_net = QNetwork(
+            state_dim, action_dim,
+            precision=self.precision_name,
+            quantize_activations=self.quantize_activations,
+        ).to(device=self.device, dtype=self.param_dtype)
+        self.update_target_network()
         self.target_net.eval()
-        
+
+        n_params = sum(p.numel() for p in self.online_net.parameters())
+        logger.info(
+            "Native precision: %s (%.2f-bit) | params: %d | packed size: %.4f MB",
+            self.precision_name,
+            self.bits,
+            n_params,
+            packed_size_mb(n_params, self.precision_name),
+        )
+
         self.optimizer = optim.Adam(self.online_net.parameters(), lr=config["agent"]["learning_rate"])
         self.memory = PrioritizedReplayBuffer(
             config["agent"]["replay_buffer_capacity"], 
@@ -131,7 +184,7 @@ class DDQNAgent:
         if not evaluate and random.random() < self.epsilon:
             return random.randint(0, self.action_dim - 1)
             
-        state_tensor = torch.tensor(state, dtype=torch.float32, device=self.device).unsqueeze(0)
+        state_tensor = torch.tensor(state, dtype=self.param_dtype, device=self.device).unsqueeze(0)
         with torch.no_grad():
             q_values = self.online_net(state_tensor)
             return int(q_values.argmax(dim=1).item())
@@ -152,13 +205,13 @@ class DDQNAgent:
         # Sample mini-batch
         states, actions, rewards, next_states, dones, weights, indices = self.memory.sample(self.batch_size, beta)
         
-        # Convert to Tensors
-        states = torch.tensor(states,dtype=torch.float32, device=self.device)
-        actions = torch.tensor(actions,dtype=torch.long, device=self.device)
-        rewards = torch.tensor(rewards,dtype=torch.float32, device=self.device)
-        next_states = torch.tensor(next_states,dtype=torch.float32, device=self.device)
-        dones = torch.tensor(dones,dtype=torch.float32, device=self.device)
-        weights = torch.tensor(weights,dtype=torch.float32, device=self.device)
+        # Convert to Tensors at the network's native compute dtype
+        states = torch.tensor(states, dtype=self.param_dtype, device=self.device)
+        actions = torch.tensor(actions, dtype=torch.long, device=self.device)
+        rewards = torch.tensor(rewards, dtype=self.param_dtype, device=self.device)
+        next_states = torch.tensor(next_states, dtype=self.param_dtype, device=self.device)
+        dones = torch.tensor(dones, dtype=self.param_dtype, device=self.device)
+        weights = torch.tensor(weights, dtype=self.param_dtype, device=self.device)
         
         # 1. Compute current Q-values: Q(s_t, a_t; theta)
         q_values = self.online_net(states)
@@ -187,9 +240,11 @@ class DDQNAgent:
         # Apply strict gradient clipping to prevent weight saturation under multi-objective reward shifts
         nn.utils.clip_grad_norm_(self.online_net.parameters(), max_norm=self.grad_clip)
         self.optimizer.step()
-        
+        if self.precision_name in GRID_PRECISIONS:
+            project_native_parameters(self.online_net)
+
         # Update priorities in buffer using absolute TD Errors
-        new_priorities = td_errors.detach().cpu().numpy() + 1e-6
+        new_priorities = td_errors.detach().float().cpu().numpy() + 1e-6
         self.memory.update_priorities(indices, new_priorities)
         
         self.total_steps += 1
@@ -198,7 +253,7 @@ class DDQNAgent:
         if self.total_steps % self.target_update_freq == 0:
             self.update_target_network()
             
-        return float(loss.item())
+        return float(loss.float().item())
 
     def decay_epsilon(self) -> None:
         """Anneal the exploration rate at the end of each episode."""
@@ -213,6 +268,8 @@ class DDQNAgent:
             "optimizer": self.optimizer.state_dict(),
             "total_steps": self.total_steps,
             "epsilon": self.epsilon,
+            "precision": self.precision_name,
+            "bits": self.bits,
         }, path)
 
     def load(self, path: str) -> None:

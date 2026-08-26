@@ -25,7 +25,7 @@ queue:
   demand_weight: 0.4        # weight given to resource demand in priority score
 
 agent:
-  precision: "fp32"
+  precision: "32"
   learning_rate: 0.0003     # lower LR for more stable generalization
   gamma: 0.98
   target_update_freq: 1000  # less frequent updates to avoid overfitting episode patterns

@@ -3,6 +3,7 @@ import sys
 import argparse
 import logging
 import random
+from copy import deepcopy
 from pathlib import Path
 
 import numpy as np
@@ -25,7 +26,7 @@ DEFAULT_CONFIG = {
         "n_edge_nodes": 0,
     },
     "agent": {
-        "precision": "fp32",
+        "precision": "32",
         "learning_rate": 0.0005,
         "gamma": 0.98,
         "target_update_freq": 750,
@@ -88,6 +89,34 @@ def load_config(config_path: str) -> dict:
 
 
 def run_training(config: dict) -> None:
+    native_cfg = config.get("native_precision") or {}
+    bits_list = native_cfg.get("bits")
+    if native_cfg.get("enabled") and bits_list:
+        from d2ql.precision import parse_precision, precision_bits
+
+        lr_overrides = native_cfg.get("learning_rate_overrides") or {}
+        for raw in bits_list:
+            name = parse_precision(raw)
+            bits = precision_bits(name)
+            run_config = deepcopy(config)
+            run_config["agent"]["precision"] = name
+            if name in lr_overrides:
+                run_config["agent"]["learning_rate"] = lr_overrides[name]
+            elif bits in lr_overrides:
+                run_config["agent"]["learning_rate"] = lr_overrides[bits]
+            elif str(bits) in lr_overrides:
+                run_config["agent"]["learning_rate"] = lr_overrides[str(bits)]
+            base_ckpt = Path(config["training"]["checkpoint_dir"])
+            run_config["training"]["checkpoint_dir"] = str(base_ckpt / name)
+            experiment_id = config.get("experiment", {}).get("id", "run")
+            run_config.setdefault("experiment", {})["id"] = f"{experiment_id}_{name}"
+            logger.info("H4 native-precision run: %s (%.2f-bit)", name, bits)
+            _run_one_training(run_config)
+        return
+    _run_one_training(config)
+
+
+def _run_one_training(config: dict) -> None:
     from d2ql.env import CloudSimEnv
     from d2ql.agent import DDQNAgent
     from d2ql.reward import RewardManager
