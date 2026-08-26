@@ -1,99 +1,136 @@
-import os
-import time 
 import gymnasium as gym
 from gymnasium import spaces
 import numpy as np
-from py4j.java_gateway import JavaGateway, GatewayParameters
+
+from d2ql.queue import PriorityCloudletQueue
+
 
 class CloudSimEnv(gym.Env):
-    def __init__(self, config):
+    """Gymnasium wrapper around the CloudSimPlus Java simulation via Py4J."""
+
+    metadata = {"render_modes": []}
+
+    def __init__(self, config: dict):
         super().__init__()
         self.config = config
-        
-        # Connect to the Java Gateway container
-        java_host = os.getenv("JAVA_HOST", "localhost")
-        java_port = int(os.getenv("JAVA_PORT", 25333))
 
-        # Retry loop: Java container may still be starting
-        max_retries = 10
-        for attempt in range(1, max_retries + 1):
-            try:
-                self.gateway = JavaGateway(
-                    gateway_parameters=GatewayParameters(address=java_host, port=java_port)
-                )
-                # Probe the connection before proceeding
-                self.gateway.entry_point.getObservation()
-                break
-            except Exception:
-                if attempt == max_retries:
-                    raise RuntimeError(f"Could not connect to java gateway at {java_host}:{java_port} after {max_retries} attempts.")    
-                time.sleep(3)
-        
-        
-        # Space specs
-        # Java currently exposes three aggregate metrics.
-        self.state_dim = 3
-        
+        n_hosts = config["datacenter"]["n_cloud_hosts"]
+
+        # Action: assign the pending cloudlet to one of n_cloud_hosts
+        self.action_space = spaces.Discrete(n_hosts)
+
+        # Observation: cpu_util per host + ram_util per host + queue depth
+        obs_dim = n_hosts * 2 + 1
         self.observation_space = spaces.Box(
-            low=0.0, high=1.0, shape=(self.state_dim,), dtype=np.float32
+            low=0.0,
+            high=1.0,
+            shape=(obs_dim,),
+            dtype=np.float32,
         )
-        # VM allocation actions + special actions
-        self.total_vms = self.config["datacenter"]["n_cloud_hosts"] * 4 # example VM count mapping
-        self.action_space = spaces.Discrete(self.total_vms + 3)
 
-        self.java_entry=None
-        self.metadata={"render_modes":[]}
+        # Priority-aware cloudlet dispatch queue
+        queue_cfg = config.get("queue", {})
+        self.cloudlet_queue = PriorityCloudletQueue(
+            urgency_weight=queue_cfg.get("urgency_weight", 0.6),
+            demand_weight=queue_cfg.get("demand_weight", 0.4),
+        )
 
+        self.gateway = None
+        self._connect_gateway()
 
+    # ------------------------------------------------------------------
+    # Py4J connection
+    # ------------------------------------------------------------------
 
-    def reset(self, seed=None, options=None):
+    def _connect_gateway(self):
+        from py4j.java_gateway import JavaGateway, GatewayParameters
+        host = self.config.get("py4j", {}).get("host", "java-sim")
+        port = self.config.get("py4j", {}).get("port", 25333)
+        self.gateway = JavaGateway(
+            gateway_parameters=GatewayParameters(host=host, port=port)
+        )
+        self.sim = self.gateway.entry_point
+
+    # ------------------------------------------------------------------
+    # Gymnasium API
+    # ------------------------------------------------------------------
+
+    def reset(self, *, seed=None, options=None):
         super().reset(seed=seed)
-        # Call the structured gateway reset, not createSimulation()
-        self.java_entry = self.gateway.entry_point
-        self.java_entry.reset()
 
-        # Fetch the real initial observation from the simulator
-        obs_java = self.java_entry.getObservation()  # returns double[]
-        obs = np.array(list(obs_java), dtype=np.float32)
+        # Clear the cloudlet queue at episode start
+        self.cloudlet_queue = PriorityCloudletQueue(
+            urgency_weight=self.config.get("queue", {}).get("urgency_weight", 0.6),
+            demand_weight=self.config.get("queue", {}).get("demand_weight", 0.4),
+        )
 
-        info = {
-            "window_index": self.java_entry.getWindowIndex(),
-            "window_start": self.java_entry.getWindowStart(),
-            "window_end": self.java_entry.getWindowEnd(),
-            "window_cloudlets": self.java_entry.getLoadedCloudlets(),
-            "last_action": self.java_entry.getLastAction(),
-        }
+        raw = self.sim.reset()
+        obs = self._parse_obs(raw)
+        info = {}
         return obs, info
 
-
-
     def step(self, action: int):
-        # 1. Send action to simulator and advance the clock
-        self.java_entry.step(action)
+        n_hosts = self.config["datacenter"]["n_cloud_hosts"]
+        host_idx = int(action) % n_hosts
 
-        # 2. Retrieve updated observation
-        obs_java = self.java_entry.getObservation()
-        obs = np.array(list(obs_java), dtype=np.float32)
+        # Refresh cloudlet priorities before dispatch
+        sim_time = float(self.sim.getSimulationTime()) if hasattr(self.sim, "getSimulationTime") else 0.0
+        self.cloudlet_queue.reprioritize(current_time=sim_time)
 
-        # 3. Check termination
-        terminated = bool(self.java_entry.isDone())
+        # Execute the action in the Java simulator
+        raw = self.sim.step(host_idx)
+        obs = self._parse_obs(raw)
+
+        # Gather step metrics from Java
+        cpu_utilizations = list(self.sim.getHostCpuUtilizations())
+        energy = float(self.sim.getTotalEnergyConsumed())
+        makespan = float(self.sim.getMakespan())
+        cost = float(self.sim.getOperationalCost())
+        sla_violations = float(self.sim.getSlaViolationCount())
+        did_migrate = bool(self.sim.didMigrateLastStep()) if hasattr(self.sim, "didMigrateLastStep") else False
+
+        terminated = bool(self.sim.isFinished())
         truncated = False
 
-        # 4. Reward is computed by RewardManager in main.py using
-        #    metrics returned from the simulator — placeholder for now
-        reward = 0.0
         info = {
-            "window_index": self.java_entry.getWindowIndex(),
-            "window_cloudlets": self.java_entry.getLoadedCloudlets(),
-            "last_action": self.java_entry.getLastAction(),
-            "makespan": self.java_entry.getMakespan(),
-            "energy": self.java_entry.getEnergy(),
-            "cost": self.java_entry.getCost(),
-            "sla_violations": self.java_entry.getSlaViolations(),
+            "cpu_utilizations": cpu_utilizations,
+            "energy": energy,
+            "makespan": makespan,
+            "cost": cost,
+            "sla_violations": sla_violations,
+            "did_migrate": did_migrate,
+            "sim_time": sim_time,
         }
+
+        # Reward is computed externally in main.py via RewardManager
+        reward = 0.0
 
         return obs, reward, terminated, truncated, info
 
+    def render(self):
+        pass
 
     def close(self):
-        self.gateway.close()
+        if self.gateway is not None:
+            self.gateway.shutdown()
+            self.gateway = None
+
+    # ------------------------------------------------------------------
+    # Internal helpers
+    # ------------------------------------------------------------------
+
+    def _parse_obs(self, raw) -> np.ndarray:
+        """Convert the Java observation array to a numpy float32 vector."""
+        n_hosts = self.config["datacenter"]["n_cloud_hosts"]
+        try:
+            obs = np.array(list(raw), dtype=np.float32)
+        except Exception:
+            obs = np.zeros(self.observation_space.shape, dtype=np.float32)
+
+        expected = self.observation_space.shape[0]
+        if len(obs) < expected:
+            obs = np.pad(obs, (0, expected - len(obs)))
+        elif len(obs) > expected:
+            obs = obs[:expected]
+
+        return np.clip(obs, 0.0, 1.0)
