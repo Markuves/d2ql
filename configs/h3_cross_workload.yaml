@@ -1,0 +1,58 @@
+experiment:
+  id: "h3_cross_workload"
+  hypothesis: "H3"
+  seed: 42
+  description: >
+    Cross-workload generalization experiment. The agent trains across
+    shuffled windows of the Azure Public Dataset V2 VM trace to learn
+    a scheduling policy robust to varied workload patterns.
+
+datacenter:
+  n_cloud_hosts: 4
+  n_edge_nodes: 0
+
+py4j:
+  host: "java-sim"
+  port: 25333
+
+workload:
+  trace_path: "data/workload.csv.gz"
+  episode_length: 50        # cloudlets per episode window
+  shuffle: true             # H3: randomise window order each epoch
+
+queue:
+  urgency_weight: 0.6       # weight given to deadline urgency in priority score
+  demand_weight: 0.4        # weight given to resource demand in priority score
+
+agent:
+  precision: "fp32"
+  learning_rate: 0.0003     # lower LR for more stable generalization
+  gamma: 0.98
+  target_update_freq: 1000  # less frequent updates to avoid overfitting episode patterns
+  batch_size: 64
+  replay_buffer_capacity: 200_000   # larger buffer to hold diverse workload transitions
+  replay_buffer_warmup: 5000        # longer warmup so buffer contains varied episodes
+  gradient_clip_norm: 10.0
+  epsilon_start: 1.0
+  epsilon_end: 0.05
+  epsilon_decay: 0.997      # slower decay: agent explores longer across workload variety
+  per_alpha: 0.6
+  per_beta_start: 0.4
+  per_beta_end: 1.0
+
+training:
+  n_episodes: 1200          # doubled vs H1: more episodes needed for generalization
+  eval_every_n_episodes: 100
+  checkpoint_dir: "outputs/checkpoints/h3"
+  tensorboard_dir: "outputs/tensorboard"
+
+reward:
+  target_utilization: 0.70
+  migration_penalty: 0.10
+  weight_lr: 0.005          # slower weight adaptation: more stable across varied episodes
+  w_perf_floor: 0.30        # higher SLA floor: deadline compliance is critical under varied load
+  w_energy_floor: 0.10
+  w_cost_floor: 0.10
+  w_perf_init: 0.50         # start with stronger SLA bias for H3
+  w_energy_init: 0.25
+  w_cost_init: 0.25
