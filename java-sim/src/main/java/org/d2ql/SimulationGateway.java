@@ -1,4 +1,4 @@
-package d2ql;
+package org.d2ql;
 
 import org.cloudsimplus.brokers.DatacenterBrokerSimple;
 import org.cloudsimplus.cloudlets.Cloudlet;
