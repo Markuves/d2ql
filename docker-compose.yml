@@ -39,16 +39,27 @@ services:
     build:
       context: .
       dockerfile: Dockerfile.python
-    deploy:
-      resources:
-        reservations:
-          devices:
-            - driver: nvidia
-              count: all
-              capabilities: [gpu]
     container_name: python-agent
-    # condition: service_healthy blocks startup until the
-    # health check above passes, not just until the container starts 
+    # Compose 5 + NVIDIA CDI: attach the host GPU. `deploy.devices` is
+    # Swarm-only and was ignored by `docker compose up`, so CUDA init failed.
+    gpus: all
+    runtime: nvidia
+    user: "0:0"
+    ipc: host
+    # Torch needs nvidia-uvm and nvidia-caps; nvidia-smi does not.
+    # Driver 610 CUDA 999 ("unknown error") if these are missing in the container.
+    devices:
+      - /dev/nvidia0
+      - /dev/nvidiactl
+      - /dev/nvidia-modeset
+      - /dev/nvidia-uvm
+      - /dev/nvidia-uvm-tools
+      - nvidia.com/gpu=all
+    volumes:
+      - ./configs:/app/configs
+      - ./data:/app/data
+      - ./outputs:/app/outputs
+      - /dev/nvidia-caps:/dev/nvidia-caps
     depends_on:
       java-sim:
         condition: service_healthy
@@ -61,15 +72,13 @@ services:
       - WINDOW_DURATION=60000
       - MAX_CLOUDLETS_PER_WINDOW=100
       - INITIAL_WINDOW_START=0
-    volumes:
-      - ./configs:/app/configs
-      - ./data:/app/data
-      #  named volume for outputs instead of a raw bind mount 
-      - ./outputs:/app/outputs
+      - NVIDIA_DRIVER_CAPABILITIES=compute,utility,video
+      - NVIDIA_DISABLE_REQUIRE=1
+      - CUDA_MODULE_LOADING=LAZY
     restart: on-failure
     networks:
       - d2ql-net
-    command: ["uv", "run", "python", "main.py", "--config", "configs/h1_adaptive_baseline.yaml"]
+    command: ["python", "main.py", "--config", "configs/h4_native_precision.yaml"]
     logging:
       driver: json-file
       options:
@@ -82,7 +91,18 @@ services:
       dockerfile: Dockerfile.python
     container_name: tensorboard
     working_dir: /app
-    command: ["uv", "run", "tensorboard", "--logdir", "/app/outputs/tensorboard", "--host", "0.0.0.0", "--port", "6006", "--reload_interval", "2", "--load_fast=false"]
+    environment:
+      # This service does not need a GPU; avoid the CUDA image warning.
+      - NVIDIA_VISIBLE_DEVICES=void
+    command:
+      [
+        "python", "-m", "tensorboard.main",
+        "--logdir", "/app/outputs/tensorboard",
+        "--host", "0.0.0.0",
+        "--port", "6006",
+        "--reload_interval", "2",
+        "--load_fast=false",
+      ]
     ports:
       - "6006:6006"
     volumes:

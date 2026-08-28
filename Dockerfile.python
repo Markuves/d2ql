@@ -3,7 +3,7 @@
 # Install build tools and resolve dependencies here so the runtime image
 # never contains compilers or build headers [1][16][18][26]
 # =============================================================================
-FROM nvidia/cuda:12.4.1-devel-ubuntu22.04 AS builder
+FROM nvidia/cuda:13.3.1-devel-ubuntu26.04 AS builder
 
 # PYTHONDONTWRITEBYTECODE prevents .pyc files from being written,
 # PYTHONUNBUFFERED ensures logs are sent directly to stdout/stderr
@@ -40,7 +40,7 @@ RUN uv python install 3.12 && \
 # Stage 2: Runtime
 # Start from a clean slim image — no compilers, no build tools [1][2][18][19]
 # =============================================================================
-FROM nvidia/cuda:12.4.1-runtime-ubuntu22.04
+FROM nvidia/cuda:13.3.1-runtime-ubuntu26.04
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
@@ -72,12 +72,16 @@ COPY --chown=d2ql:d2ql --from=builder /app/.venv /app/.venv
 
 # Make the virtual environment the active Python for all subsequent commands [16][17]
 ENV PATH="/app/.venv/bin:$PATH" \
-    UV_CACHE_DIR="/tmp/uv-cache"
+    UV_CACHE_DIR="/tmp/uv-cache" \
+    NVIDIA_DISABLE_REQUIRE=1 \
+    NVIDIA_DRIVER_CAPABILITIES=compute,utility
 
 # Copy application source last — this is the most frequently changing layer [1][26][27]
 # Keeping it at the bottom means dependency layers above are cached on code changes [26][27]
 COPY --chown=d2ql:d2ql python-agent/d2ql ./d2ql
 COPY --chown=d2ql:d2ql python-agent/main.py ./
+COPY --chown=d2ql:d2ql python-agent/entrypoint.sh ./entrypoint.sh
+RUN chmod +x /app/entrypoint.sh
 
 # drop privileges before the process starts [1][2][3][8][21]
 # All previous RUN commands executed as root to install packages and set
@@ -87,7 +91,5 @@ USER d2ql
 # Expose TensorBoard port
 EXPOSE 6006
 
-#  provide a default CMD so the image is runnable standalone [1][4]
-# docker-compose.yml overrides this with the --config argument,
-# but `docker run python-agent` will work without extra flags [4]
+ENTRYPOINT ["/app/entrypoint.sh"]
 CMD ["python", "main.py"]

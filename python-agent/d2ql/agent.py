@@ -17,8 +17,6 @@ from d2ql.precision import (
 
 logger = logging.getLogger(__name__)
 
-print(torch.cuda.is_available())
-
 def _make_linear(
     in_features: int,
     out_features: int,
@@ -133,7 +131,30 @@ class DDQNAgent:
         self.state_dim = state_dim
         self.action_dim = action_dim
         self.config = config
-        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        cuda_ok = False
+        cuda_error = None
+        try:
+            cuda_ok = bool(torch.cuda.is_available() and torch.cuda.device_count() > 0)
+            if cuda_ok:
+                torch.zeros(1, device="cuda")
+        except Exception as exc:
+            cuda_ok = False
+            cuda_error = exc
+        self.device = torch.device("cuda" if cuda_ok else "cpu")
+        logger.info(
+            "Torch device: %s | cuda_available=%s | device_count=%d | torch=%s",
+            self.device,
+            cuda_ok,
+            torch.cuda.device_count() if cuda_ok else 0,
+            torch.__version__,
+        )
+        if not cuda_ok:
+            logger.warning(
+                "CUDA is not available; training on CPU. nvidia-smi can still "
+                "succeed if the image CUDA (see Dockerfile) does not match Torch. "
+                "Rebuild python-agent after the CUDA 13 image change. Detail: %s",
+                cuda_error,
+            )
         
         # Hyperparameters
         self.gamma = config["agent"]["gamma"] # default 0.98

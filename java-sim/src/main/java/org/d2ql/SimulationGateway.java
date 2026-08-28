@@ -8,9 +8,14 @@ import org.cloudsimplus.datacenters.DatacenterSimple;
 import org.cloudsimplus.hosts.HostSimple;
 import org.cloudsimplus.resources.Pe;
 import org.cloudsimplus.resources.PeSimple;
+import org.cloudsimplus.utilizationmodels.UtilizationModel;
+import org.cloudsimplus.utilizationmodels.UtilizationModelDynamic;
 import org.cloudsimplus.utilizationmodels.UtilizationModelFull;
 import org.cloudsimplus.vms.VmSimple;
 import py4j.GatewayServer;
+
+import java.net.InetAddress;
+import java.net.UnknownHostException;
 
 import java.io.BufferedReader;
 import java.io.FileReader;
@@ -49,7 +54,8 @@ public class SimulationGateway {
     private static final String WORKLOAD_PATH = "data/workload.csv.gz";
 
     public SimulationGateway() {
-        loadWorkload();
+        // Workload windows are pushed from Python per episode.
+        // Do not load the full 2.6M-row trace into the JVM at startup.
     }
 
     // ------------------------------------------------------------------
@@ -119,6 +125,30 @@ public class SimulationGateway {
     // ------------------------------------------------------------------
 
     public double[] reset() {
+        if (workloadRecords.isEmpty()) {
+            loadWorkload();
+        }
+        return rebuildSimulation();
+    }
+
+    public void clearWorkload() {
+        workloadRecords = new ArrayList<>();
+    }
+
+    public void addWorkloadRow(double submittedAt, double deadline, double mi, double numPes) {
+        workloadRecords.add(new long[]{
+            (long) submittedAt,
+            (long) deadline,
+            Math.max(100L, (long) mi),
+            Math.max(1L, (long) numPes),
+        });
+    }
+
+    public double[] resetEpisode() {
+        return rebuildSimulation();
+    }
+
+    private double[] rebuildSimulation() {
         simulation  = new CloudSimPlus();
         hosts       = new ArrayList<>();
         cloudlets   = new ArrayList<>();
@@ -150,8 +180,10 @@ public class SimulationGateway {
         }
         broker.submitVmList(vms);
 
-        // Submit first batch of cloudlets
-        submitNextCloudlets();
+        // Materialize the episode window but bind each cloudlet only when the agent acts.
+        for (long[] rec : workloadRecords) {
+            cloudlets.add(createCloudlet(rec));
+        }
 
         simulation.startSync();
 
@@ -168,21 +200,16 @@ public class SimulationGateway {
             Cloudlet cloudlet = cloudlets.get(currentCloudletIndex);
             VmSimple targetVm = vms.get(safeHost);
             cloudlet.setVm(targetVm);
+            broker.submitCloudlet(cloudlet);
             currentCloudletIndex++;
         }
 
-        // Advance simulation by one step
-        if (!simulation.isRunning()) {
-            finished = true;
-        } else {
+        if (simulation.isRunning()) {
             simulation.runFor(1.0);
             updateEnergyAndSla();
-            submitNextCloudlets();
-
-            if (!simulation.isRunning()) {
-                finished = true;
-            }
         }
+
+        finished = currentCloudletIndex >= cloudlets.size() && !simulation.isRunning();
 
         return buildObservation();
     }
@@ -233,25 +260,18 @@ public class SimulationGateway {
     // Internal helpers
     // ------------------------------------------------------------------
 
-    private void submitNextCloudlets() {
-        int batchSize = NUM_VMS;
-        List<Cloudlet> batch = new ArrayList<>();
-
-        for (int i = 0; i < batchSize && currentCloudletIndex + i < workloadRecords.size(); i++) {
-            long[] rec = workloadRecords.get(currentCloudletIndex + i);
-            long mi     = rec[2];
-            long numPes = rec[3];
-
-            CloudletSimple cl = new CloudletSimple(mi, (int) numPes,
-                    new UtilizationModelFull());
-            cl.setFileSize(300).setOutputSize(300);
-            cloudlets.add(cl);
-            batch.add(cl);
-        }
-
-        if (!batch.isEmpty()) {
-            broker.submitCloudletList(batch);
-        }
+    private CloudletSimple createCloudlet(long[] rec) {
+        long mi = rec[2];
+        int numPes = (int) Math.min(Math.max(rec[3], 1), HOST_PES / 2);
+        CloudletSimple cl = new CloudletSimple(mi, numPes);
+        cl.setFileSize(300).setOutputSize(300);
+        // CPU can saturate a VM; RAM/BW are shared so co-located cloudlets do not
+        // each demand 100% of the VM (8192 MB / 2500 Mbps) and stall.
+        cl.setUtilizationModelCpu(new UtilizationModelFull());
+        UtilizationModel ramBw = new UtilizationModelDynamic(0.1);
+        cl.setUtilizationModelRam(ramBw);
+        cl.setUtilizationModelBw(ramBw);
+        return cl;
     }
 
     private void updateEnergyAndSla() {
@@ -290,11 +310,18 @@ public class SimulationGateway {
     // Entry point
     // ------------------------------------------------------------------
 
-    public static void main(String[] args) {
+    public static void main(String[] args) throws UnknownHostException {
+        int port = Integer.parseInt(System.getenv().getOrDefault("GATEWAY_PORT", "25333"));
         SimulationGateway gateway = new SimulationGateway();
-        GatewayServer server = new GatewayServer(gateway, 25333);
+        // Bind on all interfaces so python-agent can reach us on the Docker network.
+        // The no-arg GatewayServer constructor only listens on 127.0.0.1.
+        GatewayServer server = new GatewayServer.GatewayServerBuilder()
+                .entryPoint(gateway)
+                .javaPort(port)
+                .javaAddress(InetAddress.getByName("0.0.0.0"))
+                .build();
         server.start();
-        System.out.println("Py4J Gateway Server started on port 25333.");
+        System.out.printf("Py4J Gateway Server started on 0.0.0.0:%d.%n", port);
 
         Runtime.getRuntime().addShutdownHook(new Thread(() -> {
             server.shutdown();

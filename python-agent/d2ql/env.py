@@ -43,11 +43,14 @@ class CloudSimEnv(gym.Env):
     # ------------------------------------------------------------------
 
     def _connect_gateway(self):
+        import os
         from py4j.java_gateway import JavaGateway, GatewayParameters
-        host = self.config.get("py4j", {}).get("host", "java-sim")
-        port = self.config.get("py4j", {}).get("port", 25333)
+
+        py4j_cfg = self.config.get("py4j") or {}
+        address = py4j_cfg.get("host") or os.environ.get("JAVA_HOST", "java-sim")
+        port = int(py4j_cfg.get("port") or os.environ.get("JAVA_PORT", 25333))
         self.gateway = JavaGateway(
-            gateway_parameters=GatewayParameters(host=host, port=port)
+            gateway_parameters=GatewayParameters(address=address, port=port)
         )
         self.sim = self.gateway.entry_point
 
@@ -55,18 +58,41 @@ class CloudSimEnv(gym.Env):
     # Gymnasium API
     # ------------------------------------------------------------------
 
-    def reset(self, *, seed=None, options=None):
+    def reset(self, *, seed=None, options=None, cloudlets=None):
         super().reset(seed=seed)
 
-        # Clear the cloudlet queue at episode start
+        if cloudlets is None and isinstance(options, dict):
+            cloudlets = options.get("cloudlets")
+
+        queue_cfg = self.config.get("queue") or {}
         self.cloudlet_queue = PriorityCloudletQueue(
-            urgency_weight=self.config.get("queue", {}).get("urgency_weight", 0.6),
-            demand_weight=self.config.get("queue", {}).get("demand_weight", 0.4),
+            urgency_weight=queue_cfg.get("urgency_weight", 0.6),
+            demand_weight=queue_cfg.get("demand_weight", 0.4),
         )
 
-        raw = self.sim.reset()
+        if cloudlets:
+            self.sim.clearWorkload()
+            for spec in cloudlets:
+                self.cloudlet_queue.push(
+                    cloudlet_id=int(spec.cloudlet_id),
+                    deadline=float(spec.deadline),
+                    mi=float(spec.mi),
+                    num_pes=int(spec.num_pes),
+                    submitted_at=float(spec.submitted_at),
+                    current_time=0.0,
+                )
+                self.sim.addWorkloadRow(
+                    float(spec.submitted_at),
+                    float(spec.deadline),
+                    float(spec.mi),
+                    float(spec.num_pes),
+                )
+            raw = self.sim.resetEpisode()
+        else:
+            raw = self.sim.reset()
+
         obs = self._parse_obs(raw)
-        info = {}
+        info = {"n_cloudlets": 0 if not cloudlets else len(cloudlets)}
         return obs, info
 
     def step(self, action: int):

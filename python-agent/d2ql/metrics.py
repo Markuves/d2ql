@@ -1,11 +1,15 @@
-from torch.utils.tensorboard import SummaryWriter
+from typing import Optional
 
 
 class MetricsLogger:
     """Centralized TensorBoard logging wrapper for d2ql training runs."""
 
     def __init__(self, log_dir: str = "outputs/runs"):
-        self.writer = SummaryWriter(log_dir=log_dir)
+        from torch.utils.tensorboard import SummaryWriter
+
+        self.writer = SummaryWriter(log_dir=log_dir, flush_secs=10)
+        self.writer.add_scalar("run/started", 1.0, 0)
+        self.writer.flush()
 
     # ------------------------------------------------------------------
     # Episode-level metrics
@@ -26,6 +30,7 @@ class MetricsLogger:
         self.writer.add_scalar("episode/energy", energy, episode)
         self.writer.add_scalar("episode/cost", cost, episode)
         self.writer.add_scalar("episode/epsilon", epsilon, episode)
+        self.writer.flush()
 
     # ------------------------------------------------------------------
     # Adaptive weight metrics
@@ -42,6 +47,7 @@ class MetricsLogger:
         self.writer.add_scalar("weights/w_sla", w_sla, episode)
         self.writer.add_scalar("weights/w_energy", w_energy, episode)
         self.writer.add_scalar("weights/w_cost", w_cost, episode)
+        self.writer.flush()
 
     # ------------------------------------------------------------------
     # Agent / training metrics
@@ -56,10 +62,12 @@ class MetricsLogger:
         """Log per-update training diagnostics."""
         self.writer.add_scalar("train/loss", loss, step)
         self.writer.add_scalar("train/mean_q", mean_q, step)
+        self.writer.flush()
 
     def log_buffer(self, episode: int, buffer_size: int) -> None:
         """Log replay buffer occupancy."""
         self.writer.add_scalar("buffer/size", buffer_size, episode)
+        self.writer.flush()
 
     # ------------------------------------------------------------------
     # Lifecycle

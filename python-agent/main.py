@@ -151,7 +151,9 @@ def _run_one_training(config: dict) -> None:
         Path(config["training"].get("tensorboard_dir", "outputs/tensorboard"))
         / experiment_id
     )
+    log_dir.mkdir(parents=True, exist_ok=True)
     metrics = MetricsLogger(log_dir=str(log_dir))
+    logger.info("TensorBoard log dir: %s", log_dir.resolve())
 
     # Initialize workload trace loader
     workload_cfg = config.get("workload", {})
