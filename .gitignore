@@ -36,3 +36,7 @@ data/*
 
 # Exclude training checkpoints and telemetry
 outputs/
+prep/workload_transformed.csv
+prep/workload_clean.csv
+prep/workload.csv
+prep/workload.csv.gz
