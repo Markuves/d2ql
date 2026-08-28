@@ -4,6 +4,7 @@ import argparse
 import logging
 import random
 from copy import deepcopy
+from datetime import datetime, timezone
 from pathlib import Path
 
 import numpy as np
@@ -147,9 +148,11 @@ def _run_one_training(config: dict) -> None:
     checkpoint_dir.mkdir(parents=True, exist_ok=True)
 
     experiment_id = config.get("experiment", {}).get("id", "run")
+    run_stamp = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
     log_dir = (
         Path(config["training"].get("tensorboard_dir", "outputs/tensorboard"))
         / experiment_id
+        / run_stamp
     )
     log_dir.mkdir(parents=True, exist_ok=True)
     metrics = MetricsLogger(log_dir=str(log_dir))
@@ -230,6 +233,11 @@ def _run_one_training(config: dict) -> None:
             episode_loss += loss
             step_count += 1
             obs = next_obs
+            metrics.log_training(
+                step=max(agent.total_steps, step_count),
+                loss=loss,
+                mean_q=0.0,
+            )
 
         agent.decay_epsilon()
 

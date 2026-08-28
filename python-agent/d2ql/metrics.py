@@ -1,4 +1,4 @@
-from typing import Optional
+import logging
 
 
 class MetricsLogger:
@@ -7,9 +7,14 @@ class MetricsLogger:
     def __init__(self, log_dir: str = "outputs/runs"):
         from torch.utils.tensorboard import SummaryWriter
 
-        self.writer = SummaryWriter(log_dir=log_dir, flush_secs=10)
+        self.writer = SummaryWriter(
+            log_dir=log_dir,
+            flush_secs=1,
+            max_queue=1,
+        )
         self.writer.add_scalar("run/started", 1.0, 0)
         self.writer.flush()
+        logging.getLogger(__name__).info("TensorBoard writer ready at %s", log_dir)
 
     # ------------------------------------------------------------------
     # Episode-level metrics

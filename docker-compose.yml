@@ -101,6 +101,7 @@ services:
         "--host", "0.0.0.0",
         "--port", "6006",
         "--reload_interval", "2",
+        "--reload_multifile=true",
         "--load_fast=false",
       ]
     ports:
