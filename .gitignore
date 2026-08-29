@@ -36,3 +36,12 @@ data/*
 
 # Exclude training checkpoints and telemetry
 outputs/
+# Explicit paths produced by the H4 sweep (early stopping + results):
+outputs/checkpoints/
+outputs/tensorboard/
+outputs/results/
+
+# Python test / type / lint caches
+.coverage
+htmlcov/
+.ruff_cache/

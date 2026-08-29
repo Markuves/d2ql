@@ -54,6 +54,29 @@ training:
   checkpoint_dir: "outputs/checkpoints/h4"
   tensorboard_dir: "outputs/tensorboard"
 
+# Stop each (precision, hidden_size) run as soon as its evaluation reward
+# plateaus, instead of always running the full n_episodes budget. The metric
+# is the mean reward over a trailing window of `window_size` evaluations;
+# after `patience` consecutive evaluations without a new best window we halt.
+early_stopping:
+  enabled: true
+  patience: 3            # evaluations to wait for improvement before stopping
+  window_size: 3         # evaluations averaged into the comparison metric
+  min_evaluations: 4     # never stop before this many evaluations
+  min_delta: 0.001       # min improvement to count as "better"
+
+# Model inference latency benchmark (forward pass only) after each run, so
+# latency is comparable across precision x capacity independently of the
+# Java simulator step time.
+latency:
+  benchmark: true
+  n_samples: 200
+  warmup: 20
+
+# Where per-combination results are aggregated for later comparison.
+results:
+  csv_dir: "outputs/results"
+
 reward:
   target_utilization: 0.70
   migration_penalty: 0.10

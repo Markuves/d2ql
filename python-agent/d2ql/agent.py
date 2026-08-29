@@ -224,8 +224,82 @@ class DDQNAgent:
             config["agent"]["replay_buffer_capacity"], 
             alpha=config["agent"]["per_alpha"] # default 0.6
         )
-        
+
+        # Capacity / footprint metadata (used for H4 comparison reporting).
+        self.n_params = sum(p.numel() for p in self.online_net.parameters())
+
         self.total_steps = 0
+
+    def param_count(self) -> int:
+        """Total trainable + non-trainable parameters in the Q-network."""
+        return self.n_params
+
+    def benchmark_inference(
+        self,
+        state_dim: int,
+        n_samples: int = 200,
+        warmup: int = 20,
+    ) -> dict:
+        """Measure the *model* inference latency (forward pass only).
+
+        This isolates the network's forward cost from the Java simulator step
+        time, so latency comparisons across precision x capacity are fair.
+        Returns mean / p50 / p95 in milliseconds. Runs on the agent's device
+        (CUDA if available, else CPU) under torch.no_grad().
+        """
+        self.online_net.eval()
+        dummy = torch.zeros(1, state_dim, dtype=self.param_dtype, device=self.device)
+        # Warm up any CUDA kernels / graph before timing.
+        with torch.no_grad():
+            for _ in range(warmup):
+                self.online_net(dummy)
+
+        timings_ms: list[float] = []
+        if self.device.type == "cuda":
+            # Synchronize before/after each timed call so CUDA async launches
+            # are actually measured.
+            for _ in range(n_samples):
+                torch.cuda.synchronize()
+                start = torch.cuda.Event(enable_timing=True)
+                end = torch.cuda.Event(enable_timing=True)
+                start.record()
+                with torch.no_grad():
+                    self.online_net(dummy)
+                end.record()
+                torch.cuda.synchronize()
+                timings_ms.append(start.elapsed_time(end))
+        else:
+            import time
+
+            for _ in range(n_samples):
+                t0 = time.perf_counter()
+                with torch.no_grad():
+                    self.online_net(dummy)
+                timings_ms.append((time.perf_counter() - t0) * 1000.0)
+
+        timings_ms.sort()
+        mean_ms = sum(timings_ms) / len(timings_ms)
+        p50_ms = timings_ms[len(timings_ms) // 2]
+        p95_idx = min(len(timings_ms) - 1, int(0.95 * (len(timings_ms) - 1) + 0.5))
+        p95_ms = timings_ms[p95_idx]
+        logger.info(
+            "Inference benchmark (%s, hidden %d x %d, device=%s): "
+            "mean=%.3f ms p50=%.3f ms p95=%.3f ms over %d samples",
+            self.precision_name,
+            self.n_hidden_layers,
+            self.hidden_size,
+            self.device.type,
+            mean_ms,
+            p50_ms,
+            p95_ms,
+            n_samples,
+        )
+        return {
+            "mean_ms": mean_ms,
+            "p50_ms": p50_ms,
+            "p95_ms": p95_ms,
+            "n_samples": n_samples,
+        }
 
     def select_action(self, state: np.ndarray, evaluate: bool = False) -> int:
         """Epsilon-greedy action selection."""

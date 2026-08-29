@@ -143,9 +143,34 @@ def _run_one_training(config: dict) -> None:
     from d2ql.reward import RewardManager
     from d2ql.metrics import MetricsLogger
     from d2ql.workload import AzureTraceLoader
+    from d2ql.early_stopping import EarlyStopper
+    from d2ql.results import RunResult, save_run_result
+    from d2ql.precision import packed_size_mb, precision_bits, parse_precision
+
+    import time as _time
 
     checkpoint_dir = Path(config["training"]["checkpoint_dir"])
     checkpoint_dir.mkdir(parents=True, exist_ok=True)
+
+    results_cfg = config.get("results") or {}
+    results_dir = results_cfg.get("csv_dir", "outputs/results")
+
+    es_cfg = config.get("early_stopping") or {}
+    early_stopping_enabled = bool(es_cfg.get("enabled", True))
+    if early_stopping_enabled:
+        stopper = EarlyStopper(
+            patience=int(es_cfg.get("patience", 3)),
+            window_size=int(es_cfg.get("window_size", 3)),
+            min_evaluations=int(es_cfg.get("min_evaluations", 4)),
+            min_delta=float(es_cfg.get("min_delta", 1e-3)),
+        )
+    else:
+        stopper = None
+
+    latency_cfg = config.get("latency") or {}
+    latency_enabled = bool(latency_cfg.get("benchmark", True))
+    latency_samples = int(latency_cfg.get("n_samples", 200))
+    latency_warmup = int(latency_cfg.get("warmup", 20))
 
     experiment_id = config.get("experiment", {}).get("id", "run")
     run_stamp = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
@@ -194,13 +219,23 @@ def _run_one_training(config: dict) -> None:
     eval_every = config["training"]["eval_every_n_episodes"]
 
     logger.info(
-        "Starting training: %d episodes, evaluating every %d.",
-        n_episodes, eval_every
+        "Starting training: %d episodes (early_stopping=%s, eval_every=%d).",
+        n_episodes, early_stopping_enabled, eval_every
     )
+
+    wall_start = _time.perf_counter()
 
     prev_makespan = None
     prev_energy = None
     prev_cost = None
+
+    # Best *deterministic* evaluation (sum of rewards over an eval window).
+    best_eval_reward = float("-inf")
+    best_eval_episode = 0
+    eval_window_reward = 0.0  # accumulated reward since last eval boundary
+    episodes_trained = 0
+    stopped_early = False
+    final_es_reason = ""
 
     for episode in range(n_episodes):
         # Sample next episode workload window from the trace
@@ -307,14 +342,114 @@ def _run_one_training(config: dict) -> None:
             buffer_size=len(agent.memory),
         )
 
-        if (episode + 1) % eval_every == 0:
-            checkpoint_path = checkpoint_dir / f"checkpoint_ep{episode + 1}.pt"
-            agent.save(str(checkpoint_path))
-            logger.info("Checkpoint saved to %s.", checkpoint_path)
+        eval_window_reward += episode_reward
+        is_eval_point = (episode + 1) % eval_every == 0
 
+        if is_eval_point:
+            # Deterministic best-eval tracking (this window's summed reward).
+            if eval_window_reward > best_eval_reward:
+                best_eval_reward = eval_window_reward
+                best_eval_episode = episode + 1
+            if stopper is not None:
+                stopper.update(
+                    episode=episode + 1,
+                    reward=eval_window_reward,
+                    extra={
+                        "makespan": makespan,
+                        "energy": energy,
+                        "cost": cost,
+                        "epsilon": agent.epsilon,
+                        "avg_loss": avg_loss,
+                    },
+                )
+                if stopper.should_stop():
+                    stopped_early = True
+                    final_es_reason = stopper.result(episode + 1, True).reason
+                    logger.info(
+                        "EARLY STOP at episode %d/%d: %s",
+                        episode + 1, n_episodes, final_es_reason,
+                    )
+                    break
+            eval_window_reward = 0.0
+
+    # If the loop never ran (n_episodes == 0), treat as a 0-length run.
+    episodes_trained = episode + 1 if n_episodes > 0 else 0
+    es_result = (
+        stopper.result(episodes_trained, stopped_early)
+        if stopper is not None
+        else None
+    )
+    es_reason = es_result.reason if es_result is not None else "early_stopping disabled"
+
+    # Final checkpoint (whether stopped early or not).
     final_path = checkpoint_dir / "checkpoint_final.pt"
     agent.save(str(final_path))
-    logger.info("Training complete. Final checkpoint saved to %s.", final_path)
+    if stopped_early:
+        logger.info(
+            "Run stopped early. Final checkpoint saved to %s.", final_path
+        )
+    else:
+        logger.info(
+            "Training complete (full budget). Final checkpoint saved to %s.", final_path
+        )
+
+    # Latency benchmark of the trained model (forward pass only).
+    latency = {
+        "mean_ms": float("nan"),
+        "p50_ms": float("nan"),
+        "p95_ms": float("nan"),
+        "n_samples": 0,
+    }
+    if latency_enabled:
+        latency = agent.benchmark_inference(
+            state_dim=env.observation_space.shape[0],
+            n_samples=latency_samples,
+            warmup=latency_warmup,
+        )
+
+    wall_clock_s = _time.perf_counter() - wall_start
+
+    # Persist comparable per-combination results.
+    precision_name = parse_precision(config["agent"].get("precision", "32"))
+    params = agent.param_count()
+    result = RunResult(
+        experiment_id=experiment_id,
+        precision=precision_name,
+        bits=precision_bits(precision_name),
+        hidden_size=int(config["agent"].get("hidden_size", 256)),
+        n_hidden_layers=int(config["agent"].get("n_hidden_layers", 2)),
+        episodes_trained=episodes_trained,
+        stopped_early=stopped_early,
+        best_episode=es_result.best_episode if es_result is not None else best_eval_episode,
+        best_mean_reward=(
+            es_result.best_window_reward
+            if es_result is not None and es_result.best_window_reward is not None
+            else best_eval_reward
+        ),
+        best_eval_reward=(
+            best_eval_reward if best_eval_reward != float("-inf") else 0.0
+        ),
+        best_eval_episode=best_eval_episode,
+        latency_mean_ms=latency["mean_ms"],
+        latency_p50_ms=latency["p50_ms"],
+        latency_p95_ms=latency["p95_ms"],
+        latency_n_samples=latency["n_samples"],
+        params=params,
+        packed_size_mb=packed_size_mb(params, precision_name),
+        wall_clock_s=wall_clock_s,
+        device=str(agent.device),
+        seed=int(config["experiment"]["seed"]),
+        notes=es_reason,
+        extra={
+            "eval_every": eval_every,
+            "n_episodes_budget": n_episodes,
+        },
+    )
+    save_run_result(
+        result,
+        checkpoint_dir=str(checkpoint_dir),
+        results_dir=results_dir,
+    )
 
     metrics.close()
     env.close()

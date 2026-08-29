@@ -64,10 +64,15 @@ class MetricsLogger:
         loss: float,
         mean_q: float,
     ) -> None:
-        """Log per-update training diagnostics."""
+        """Log per-update training diagnostics.
+
+        No flush here: this is called once per training step (~tens of
+        thousands of times per run) and TensorBoard's async writer already
+        flushes on its own cadence. Flushing per-step was the dominant I/O
+        cost of training and slowed the whole sweep.
+        """
         self.writer.add_scalar("train/loss", loss, step)
         self.writer.add_scalar("train/mean_q", mean_q, step)
-        self.writer.flush()
 
     def log_buffer(self, episode: int, buffer_size: int) -> None:
         """Log replay buffer occupancy."""
