@@ -21,7 +21,9 @@ import java.io.BufferedReader;
 import java.io.FileReader;
 import java.io.IOException;
 import java.util.ArrayList;
+import java.util.HashSet;
 import java.util.List;
+import java.util.Set;
 
 public class SimulationGateway {
 
@@ -40,8 +42,13 @@ public class SimulationGateway {
     private int currentCloudletIndex = 0;
     private boolean finished = false;
     private double totalEnergyConsumed = 0.0;
+    // C3 fix: differentiated per-host cost (price per watt differs per host), so
+    // operational cost is NOT a constant multiple of energy. The agent can learn
+    // to prefer cheaper hosts, decoupling the cost objective from energy.
+    private double totalOperationalCost = 0.0;
     private int slaViolationCount = 0;
-    private boolean migratedLastStep = false;
+    // A2 fix: each cloudlet counts as an SLA violation at most once.
+    private final Set<Integer> countedSlaCloudlets = new HashSet<>();
 
     // Configuration constants
     private static final int NUM_HOSTS = 4;
@@ -52,6 +59,9 @@ public class SimulationGateway {
     private static final long HOST_BW = 10_000;    // Mbps
     private static final long HOST_STORAGE = 1_000_000;
     private static final String WORKLOAD_PATH = "data/workload.csv.gz";
+    // C3 fix: USD per watt-hour, differentiated per host index so cost objective
+    // is decoupled from the single flat energy number.
+    private static final double[] HOST_PRICE_PER_WATT = {0.048, 0.024, 0.048, 0.030};
 
     public SimulationGateway() {
         // Workload windows are pushed from Python per episode.
@@ -156,8 +166,9 @@ public class SimulationGateway {
         currentCloudletIndex = 0;
         finished             = false;
         totalEnergyConsumed  = 0.0;
+        totalOperationalCost = 0.0;
         slaViolationCount    = 0;
-        migratedLastStep     = false;
+        countedSlaCloudlets.clear();
 
         // Build hosts
         for (int i = 0; i < NUM_HOSTS; i++) {
@@ -191,8 +202,6 @@ public class SimulationGateway {
     }
 
     public double[] step(int hostIndex) {
-        migratedLastStep = false;
-
         int safeHost = Math.floorMod(hostIndex, NUM_HOSTS);
 
         // Assign the next pending cloudlet to the chosen host's VM
@@ -240,16 +249,13 @@ public class SimulationGateway {
     }
 
     public double getOperationalCost() {
-        // Simple cost model: $0.048 per host per simulated hour
-        return totalEnergyConsumed * 0.048;
+        // C3 fix: differentiated per-host cost accumulated in updateEnergyAndSla,
+        // no longer a constant multiple of total energy.
+        return totalOperationalCost;
     }
 
     public int getSlaViolationCount() {
         return slaViolationCount;
-    }
-
-    public boolean didMigrateLastStep() {
-        return migratedLastStep;
     }
 
     public double getSimulationTime() {
@@ -276,18 +282,31 @@ public class SimulationGateway {
 
     private void updateEnergyAndSla() {
         double stepEnergy = 0.0;
-        for (HostSimple host : hosts) {
-            stepEnergy += host.getPowerModel().getPower(host.getCpuPercentUtilization());
+        double stepCost = 0.0;
+        for (int i = 0; i < hosts.size(); i++) {
+            HostSimple host = hosts.get(i);
+            double power = host.getPowerModel().getPower(host.getCpuPercentUtilization());
+            stepEnergy += power;
+            // C3: cost weights each host by its own price per watt, differing by index.
+            double price = HOST_PRICE_PER_WATT[Math.min(i, HOST_PRICE_PER_WATT.length - 1)];
+            stepCost += power * price;
         }
         // Convert watts to watt-hours (step size = 1 simulated second)
         totalEnergyConsumed += stepEnergy / 3600.0;
+        totalOperationalCost += stepCost / 3600.0; // C3
 
-        // Count cloudlets that exceeded their original deadline
+        // A2 fix: count each cloudlet as an SLA violation at most once. Previously
+        // every finished-and-past-deadline cloudlet was re-counted on each step,
+        // inflating the count superlinearly and making reward non-comparable.
         for (int i = 0; i < cloudlets.size() && i < workloadRecords.size(); i++) {
+            if (countedSlaCloudlets.contains(i)) {
+                continue;
+            }
             Cloudlet cl = cloudlets.get(i);
             if (cl.getFinishTime() > 0) {
                 long deadline = workloadRecords.get(i)[1];
                 if (cl.getFinishTime() > deadline) {
+                    countedSlaCloudlets.add(i);
                     slaViolationCount++;
                 }
             }

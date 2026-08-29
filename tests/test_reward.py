@@ -1,7 +1,7 @@
-import pytest
-import numpy as np
-import sys
 import os
+import sys
+
+import pytest
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "../python-agent"))
 
@@ -10,7 +10,6 @@ from d2ql.reward import RewardManager
 CONFIG = {
     "reward": {
         "target_utilization": 0.70,
-        "migration_penalty": 0.10,
         "weight_lr": 0.01,
         "w_perf_floor": 0.2,
         "w_energy_floor": 0.1,
@@ -43,66 +42,66 @@ def test_initial_weights_match_config(reward_manager):
 def test_reward_no_violations_full_utilization(reward_manager):
     # All hosts at target utilization, no SLA violations, no energy cost
     reward = reward_manager.compute_step_reward(
-        energy_this_step=0.0,
+        energy_delta=0.0,
         sla_violations_this_step=0.0,
         host_cpu_utilizations=[0.70, 0.70, 0.70, 0.70],
-        did_migrate=False
     )
     # phi_util should be 1.0, phi_sla and phi_energy both 0.0
     assert reward == pytest.approx(reward_manager.w[2] * 1.0, abs=1e-6)
 
 
-def test_reward_migration_penalty_applied(reward_manager):
-    reward_no_migrate = reward_manager.compute_step_reward(
-        energy_this_step=0.0,
-        sla_violations_this_step=0.0,
-        host_cpu_utilizations=[0.70, 0.70, 0.70, 0.70],
-        did_migrate=False
-    )
-    reward_migrate = reward_manager.compute_step_reward(
-        energy_this_step=0.0,
-        sla_violations_this_step=0.0,
-        host_cpu_utilizations=[0.70, 0.70, 0.70, 0.70],
-        did_migrate=True
-    )
-    assert reward_no_migrate - reward_migrate == pytest.approx(0.10, abs=1e-6)
-
-
 def test_reward_sla_violation_negative(reward_manager):
     reward = reward_manager.compute_step_reward(
-        energy_this_step=0.0,
+        energy_delta=0.0,
         sla_violations_this_step=1.0,
         host_cpu_utilizations=[0.70, 0.70, 0.70, 0.70],
-        did_migrate=False
     )
     # phi_sla is negative when violations > 0
     assert reward < reward_manager.w[2] * 1.0
 
 
-def test_reward_energy_cost_negative(reward_manager):
+def test_reward_energy_delta_negative(reward_manager):
+    # A1 fix: the energy term must use the per-step delta, so a positive delta
+    # reduces reward the same way as the old cumulative value did assumption-wise.
     reward = reward_manager.compute_step_reward(
-        energy_this_step=1.0,
+        energy_delta=1.0,
         sla_violations_this_step=0.0,
         host_cpu_utilizations=[0.70, 0.70, 0.70, 0.70],
-        did_migrate=False
     )
-    # phi_energy = -energy/e_ref = -1.0, so reward should decrease
     reward_no_energy = reward_manager.compute_step_reward(
-        energy_this_step=0.0,
+        energy_delta=0.0,
         sla_violations_this_step=0.0,
         host_cpu_utilizations=[0.70, 0.70, 0.70, 0.70],
-        did_migrate=False
     )
+    # phi_energy = -delta/e_ref = -1.0, so reward should decrease
     assert reward < reward_no_energy
+
+
+def test_reward_energy_delta_scales_linearly(reward_manager):
+    # A1: reward from energy must be linear in the delta (not in the cumulative
+    # magnitude), so a large delta has the same bounded effect regardless of
+    # how far along the episode we are.
+    r_small = reward_manager.compute_step_reward(
+        energy_delta=0.5,
+        sla_violations_this_step=0.0,
+        host_cpu_utilizations=[0.70, 0.70, 0.70, 0.70],
+    )
+    r_large = reward_manager.compute_step_reward(
+        energy_delta=1.0,
+        sla_violations_this_step=0.0,
+        host_cpu_utilizations=[0.70, 0.70, 0.70, 0.70],
+    )
+    # phi_energy doubles: -0.5 -> -1.0, so the delta between the two rewards
+    # equals the single-delta penalty magnitude.
+    assert (r_small - r_large) == pytest.approx(0.5 * reward_manager.w[1], abs=1e-6)
 
 
 def test_reward_empty_host_utilizations(reward_manager):
     # Should not crash, phi_util defaults to 0.0
     reward = reward_manager.compute_step_reward(
-        energy_this_step=0.0,
+        energy_delta=0.0,
         sla_violations_this_step=0.0,
         host_cpu_utilizations=[],
-        did_migrate=False
     )
     assert isinstance(reward, float)
 

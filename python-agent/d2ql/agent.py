@@ -13,6 +13,8 @@ from d2ql.precision import (
     parse_precision,
     precision_bits,
     project_native_parameters,
+    model_flops,
+    effective_capacity_bits,
 )
 
 logger = logging.getLogger(__name__)
@@ -67,6 +69,12 @@ class QNetwork(nn.Module):
 
     def forward(self, state: torch.Tensor) -> torch.Tensor:
         return self.network(state)
+
+    def set_deploy(self, deploy: bool) -> None:
+        """Toggle real int8 kernel on the grid layers (B1). Used for inference/latency."""
+        for module in self.network.modules():
+            if isinstance(module, NativeBitLinear):
+                module.deploy = bool(deploy)
 
 
 class PrioritizedReplayBuffer:
@@ -234,6 +242,19 @@ class DDQNAgent:
         """Total trainable + non-trainable parameters in the Q-network."""
         return self.n_params
 
+    def flops(self) -> float:
+        """FLOPs per forward pass (B2 normalization axis)."""
+        return model_flops(
+            self.state_dim,
+            self.hidden_size,
+            self.n_hidden_layers,
+            self.action_dim,
+        )
+
+    def effective_capacity_bits(self) -> float:
+        """n_params * stored bit-width (B2 normalization axis)."""
+        return effective_capacity_bits(self.n_params, self.bits)
+
     def benchmark_inference(
         self,
         state_dim: int,
@@ -248,6 +269,10 @@ class DDQNAgent:
         (CUDA if available, else CPU) under torch.no_grad().
         """
         self.online_net.eval()
+        # B1 fix: measure the REAL low-bit kernel (deploy mode), so latency
+        # reflects genuine int8 tensor-core speedup, not the fake-but-fast
+        # float32 STE path.
+        self.online_net.set_deploy(True)
         dummy = torch.zeros(1, state_dim, dtype=self.param_dtype, device=self.device)
         # Warm up any CUDA kernels / graph before timing.
         with torch.no_grad():
@@ -294,6 +319,8 @@ class DDQNAgent:
             p95_ms,
             n_samples,
         )
+        # Restore the training-time STE path so the agent isn't left in deploy mode.
+        self.online_net.set_deploy(False)
         return {
             "mean_ms": mean_ms,
             "p50_ms": p50_ms,

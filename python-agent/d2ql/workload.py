@@ -62,21 +62,43 @@ class AzureTraceLoader:
         episode_length: int = 50,
         mi_scale: float = 1000.0,
         seed: Optional[int] = None,
+        holdout_frac: float = 0.0,
     ) -> None:
         self.trace_path = Path(trace_path)
         self.episode_length = episode_length
         self.mi_scale = mi_scale
+        self.holdout_frac = holdout_frac
         self.rng = random.Random(seed)
         np.random.seed(seed)
 
         self._df: pd.DataFrame = self._load()
         self._windows: list[pd.DataFrame] = self._partition()
+        self._split_holdout()
         logger.info(
-            "AzureTraceLoader ready: %d rows -> %d episode windows of length %d.",
+            "AzureTraceLoader ready: %d rows -> %d episode windows (%d train / %d eval / length %d).",
             len(self._df),
             len(self._windows),
+            len(self._train_windows),
+            len(self._test_windows),
             self.episode_length,
         )
+
+    # ------------------------------------------------------------------
+    # Train / eval split (C1 fix: held-out evaluation on unseen windows)
+    # ------------------------------------------------------------------
+
+    def _split_holdout(self) -> None:
+        """Hold out the trailing `holdout_frac` fraction of windows (chronological)."""
+        n = len(self._windows)
+        if self.holdout_frac > 0.0 and n > 1:
+            n_test = max(1, int(round(n * self.holdout_frac)))
+            self._train_windows = self._windows[: n - n_test]
+            self._test_windows = self._windows[n - n_test :]
+        else:
+            self._train_windows = self._windows
+            self._test_windows = self._windows
+        logger.info("Holdout split: holdout_frac=%.2f -> %d train / %d eval windows",
+                    self.holdout_frac, len(self._train_windows), len(self._test_windows))
 
     # ------------------------------------------------------------------
     # Loading and partitioning
@@ -150,11 +172,11 @@ class AzureTraceLoader:
         shuffle: bool = True,
     ) -> Iterator[list[CloudletSpec]]:
         """
-        Yield n_episodes lists of CloudletSpec, sampling windows with
+        Yield n_episodes lists of CloudletSpec, sampling TRAIN windows with
         replacement. shuffle=True (H3 mode) randomises window order each
         epoch so the agent sees varied workload orderings.
         """
-        window_indices = list(range(len(self._windows)))
+        window_indices = list(range(len(self._train_windows)))
         yielded = 0
 
         while yielded < n_episodes:
@@ -163,12 +185,27 @@ class AzureTraceLoader:
             for idx in window_indices:
                 if yielded >= n_episodes:
                     break
-                yield self._window_to_specs(self._windows[idx])
+                yield self._window_to_specs(self._train_windows[idx])
                 yielded += 1
 
+    def eval_episodes(self, n_episodes: int) -> list[list[CloudletSpec]]:
+        """
+        Deterministically sample n_episodes windows from the HELD-OUT eval
+        set (C1 fix). Used for fair, epsilon-free evaluation and business-metric
+        reporting on workload the agent never trained on.
+        """
+        if not self._test_windows:
+            return []
+        indices = list(range(len(self._test_windows)))
+        self.rng.shuffle(indices)
+        return [
+            self._window_to_specs(self._test_windows[idx])
+            for idx in indices[:n_episodes]
+        ]
+
     def sample_episode(self) -> list[CloudletSpec]:
-        """Return a single randomly sampled episode window."""
-        window = self.rng.choice(self._windows)
+        """Return a single randomly sampled TRAIN episode window."""
+        window = self.rng.choice(self._train_windows)
         return self._window_to_specs(window)
 
     def _window_to_specs(self, window: pd.DataFrame) -> list[CloudletSpec]:

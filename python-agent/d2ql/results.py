@@ -47,6 +47,18 @@ class RunResult:
     latency_n_samples: int
     params: int
     packed_size_mb: float
+    # B2: compute-cost normalization axes so the Pareto compares real cost.
+    flops: float
+    effective_capacity_bits: float
+    # C2: reward normalized per step.
+    avg_steps: float
+    norm_reward: float
+    # C1: held-out evaluation with business metrics (on unseen workload).
+    eval_episodes: int
+    eval_mean_reward: float
+    eval_makespan: float
+    eval_sla_violations: float
+    eval_sla_rate: float
     wall_clock_s: float
     device: str
     seed: int
@@ -79,6 +91,15 @@ class RunResult:
             "latency_n_samples",
             "params",
             "packed_size_mb",
+            "flops",
+            "effective_capacity_bits",
+            "avg_steps",
+            "norm_reward",
+            "eval_episodes",
+            "eval_mean_reward",
+            "eval_makespan",
+            "eval_sla_violations",
+            "eval_sla_rate",
             "wall_clock_s",
             "device",
             "seed",

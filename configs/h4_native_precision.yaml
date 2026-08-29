@@ -25,6 +25,13 @@ workload:
   trace_path: "data/workload.csv.gz"
   episode_length: 50
   shuffle: false
+  # C1 fix: hold out the trailing fraction of episode windows for a clean,
+  # unseen-workload evaluation after training.
+  holdout_frac: 0.2
+
+# C1 fix: deterministic, epsilon-free held-out evaluation (business metrics).
+evaluation:
+  n_episodes: 10
 
 queue:
   urgency_weight: 0.6

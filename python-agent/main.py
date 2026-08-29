@@ -91,6 +91,71 @@ def load_config(config_path: str) -> dict:
     return loaded
 
 
+def _run_heldout_eval(
+    env,
+    agent,
+    reward_manager,
+    eval_cloudlets,
+) -> dict:
+    """Deterministic, epsilon-free evaluation on held-out workload (C1 fix).
+
+    Runs every held-out episode greedily and reports business metrics
+    (mean reward, makespan, SLA violations and SLA rate per cloudlet) so the
+    precision x capacity comparison uses clean, workload-independent numbers
+    instead of the noisy training-time reward sum.
+    """
+    n_episodes = len(eval_cloudlets)
+    if n_episodes == 0:
+        return {
+            "eval_episodes": 0,
+            "eval_mean_reward": float("nan"),
+            "eval_makespan": float("nan"),
+            "eval_sla_violations": 0.0,
+            "eval_sla_rate": float("nan"),
+        }
+
+    total_reward = 0.0
+    total_cloudlets = 0
+    makespans: list[float] = []
+
+    for cloudlets in eval_cloudlets:
+        obs, _ = env.reset(cloudlets=cloudlets)
+        ep_reward = 0.0
+        terminated = False
+        truncated = False
+        info: dict = {}
+        while not (terminated or truncated):
+            action = agent.select_action(obs, evaluate=True)  # greedy
+            obs, _, terminated, truncated, info = env.step(action)
+            ep_reward += reward_manager.compute_step_reward(
+                energy_delta=info.get("energy_delta", 0.0),
+                sla_violations_this_step=info.get("sla_violations", 0.0),
+                host_cpu_utilizations=info.get("cpu_utilizations", []),
+            )
+        total_reward += ep_reward
+        total_cloudlets += len(cloudlets)
+        makespans.append(info.get("makespan", 0.0))
+
+    # Distinct SLA violations (A2 fix) across the held-out episodes.
+    sla = float(env.sim.getSlaViolationCount()) if hasattr(env.sim, "getSlaViolationCount") else 0.0
+    avg_makespan = sum(makespans) / max(len(makespans), 1)
+    avg_reward = total_reward / max(n_episodes, 1)
+    sla_rate = sla / max(total_cloudlets, 1)
+
+    logger.info(
+        "Held-out eval: %d episodes | mean_reward=%.4f | makespan=%.2f | "
+        "sla_violations=%.0f | sla_rate=%.4f",
+        n_episodes, avg_reward, avg_makespan, sla, sla_rate,
+    )
+    return {
+        "eval_episodes": n_episodes,
+        "eval_mean_reward": avg_reward,
+        "eval_makespan": avg_makespan,
+        "eval_sla_violations": sla,
+        "eval_sla_rate": sla_rate,
+    }
+
+
 def run_training(config: dict) -> None:
     native_cfg = config.get("native_precision") or {}
     bits_list = native_cfg.get("bits")
@@ -189,6 +254,7 @@ def _run_one_training(config: dict) -> None:
         trace_path=workload_cfg.get("trace_path", "data/workload.csv.gz"),
         episode_length=workload_cfg.get("episode_length", 50),
         seed=config["experiment"]["seed"],
+        holdout_frac=float(workload_cfg.get("holdout_frac", 0.0)),
     )
     logger.info("Workload summary: %s", trace_loader.summary())
 
@@ -234,6 +300,7 @@ def _run_one_training(config: dict) -> None:
     best_eval_episode = 0
     eval_window_reward = 0.0  # accumulated reward since last eval boundary
     episodes_trained = 0
+    steps_total = 0  # C2: accumulate steps across episodes for avg_steps
     stopped_early = False
     final_es_reason = ""
 
@@ -254,10 +321,9 @@ def _run_one_training(config: dict) -> None:
             next_obs, _, terminated, truncated, info = env.step(action)
 
             reward = reward_manager.compute_step_reward(
-                energy_this_step=info.get("energy", 0.0),
+                energy_delta=info.get("energy_delta", 0.0),
                 sla_violations_this_step=info.get("sla_violations", 0.0),
                 host_cpu_utilizations=info.get("cpu_utilizations", []),
-                did_migrate=info.get("did_migrate", False)
             )
 
             done_flag = float(terminated or truncated)
@@ -275,6 +341,7 @@ def _run_one_training(config: dict) -> None:
             )
 
         agent.decay_epsilon()
+        steps_total += step_count  # C2
 
         makespan = info.get("makespan", 0.0)
         energy = info.get("energy", 0.0)
@@ -393,6 +460,13 @@ def _run_one_training(config: dict) -> None:
             "Training complete (full budget). Final checkpoint saved to %s.", final_path
         )
 
+    # C1: deterministic held-out evaluation with business metrics on
+    # workload the agent never trained on (unseen episode windows).
+    eval_cfg = config.get("evaluation") or {}
+    n_eval_episodes = int(eval_cfg.get("n_episodes", 10))
+    eval_cloudlets = trace_loader.eval_episodes(n_eval_episodes)
+    eval_metrics = _run_heldout_eval(env, agent, reward_manager, eval_cloudlets)
+
     # Latency benchmark of the trained model (forward pass only).
     latency = {
         "mean_ms": float("nan"),
@@ -409,6 +483,17 @@ def _run_one_training(config: dict) -> None:
 
     wall_clock_s = _time.perf_counter() - wall_start
 
+    # B2 / C2: compute-cost and per-step-normalized reward axes for the Pareto.
+    avg_steps = steps_total / max(episodes_trained, 1)
+    best_mean_reward = (
+        es_result.best_window_reward
+        if es_result is not None and es_result.best_window_reward is not None
+        else best_eval_reward
+    )
+    if not isinstance(best_mean_reward, (int, float)) or best_mean_reward in (float("-inf"), float("inf")):
+        best_mean_reward = 0.0
+    norm_reward = best_mean_reward / max(avg_steps, 1e-6)
+
     # Persist comparable per-combination results.
     precision_name = parse_precision(config["agent"].get("precision", "32"))
     params = agent.param_count()
@@ -421,11 +506,7 @@ def _run_one_training(config: dict) -> None:
         episodes_trained=episodes_trained,
         stopped_early=stopped_early,
         best_episode=es_result.best_episode if es_result is not None else best_eval_episode,
-        best_mean_reward=(
-            es_result.best_window_reward
-            if es_result is not None and es_result.best_window_reward is not None
-            else best_eval_reward
-        ),
+        best_mean_reward=best_mean_reward,
         best_eval_reward=(
             best_eval_reward if best_eval_reward != float("-inf") else 0.0
         ),
@@ -436,6 +517,15 @@ def _run_one_training(config: dict) -> None:
         latency_n_samples=latency["n_samples"],
         params=params,
         packed_size_mb=packed_size_mb(params, precision_name),
+        flops=agent.flops(),
+        effective_capacity_bits=agent.effective_capacity_bits(),
+        avg_steps=avg_steps,
+        norm_reward=norm_reward,
+        eval_episodes=eval_metrics["eval_episodes"],
+        eval_mean_reward=eval_metrics["eval_mean_reward"],
+        eval_makespan=eval_metrics["eval_makespan"],
+        eval_sla_violations=eval_metrics["eval_sla_violations"],
+        eval_sla_rate=eval_metrics["eval_sla_rate"],
         wall_clock_s=wall_clock_s,
         device=str(agent.device),
         seed=int(config["experiment"]["seed"]),

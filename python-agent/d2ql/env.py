@@ -36,6 +36,7 @@ class CloudSimEnv(gym.Env):
         )
 
         self.gateway = None
+        self._prev_energy = 0.0  # cumulative energy of the previous step (A1 fix)
         self._connect_gateway()
 
     # ------------------------------------------------------------------
@@ -91,6 +92,7 @@ class CloudSimEnv(gym.Env):
         else:
             raw = self.sim.reset()
 
+        self._prev_energy = 0.0  # A1 fix: start each episode's energy delta from zero
         obs = self._parse_obs(raw)
         info = {"n_cloudlets": 0 if not cloudlets else len(cloudlets)}
         return obs, info
@@ -113,18 +115,22 @@ class CloudSimEnv(gym.Env):
         makespan = float(self.sim.getMakespan())
         cost = float(self.sim.getOperationalCost())
         sla_violations = float(self.sim.getSlaViolationCount())
-        did_migrate = bool(self.sim.didMigrateLastStep()) if hasattr(self.sim, "didMigrateLastStep") else False
+
+        # A1 fix: report the per-step energy increment, not the cumulative total,
+        # so the reward term stays bounded and comparable across episode lengths.
+        energy_delta = energy - self._prev_energy
+        self._prev_energy = energy
 
         terminated = bool(self.sim.isFinished())
         truncated = False
 
         info = {
             "cpu_utilizations": cpu_utilizations,
-            "energy": energy,
+            "energy": energy,              # cumulative (for episode totals / logs)
+            "energy_delta": energy_delta,  # per-step increment (for reward, A1)
             "makespan": makespan,
             "cost": cost,
             "sla_violations": sla_violations,
-            "did_migrate": did_migrate,
             "sim_time": sim_time,
         }
 

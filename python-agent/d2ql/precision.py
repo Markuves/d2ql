@@ -74,6 +74,100 @@ def quantize_ternary(x: torch.Tensor, channel_dim: Optional[int] = None) -> torc
     return torch.round(x / scale).clamp(-1, 1) * scale
 
 
+# ---------------------------------------------------------------------------
+# Real low-bit kernel (B1 fix, option 1)
+#
+# NativeBitLinear.B1: on CUDA the grid precisions (ternary / 4 / 8) run a
+# GENUINE int8 matmul kernel via torch._int_mm (int8 x int8 -> int32), which
+# is actually faster than float32 on tensor-core GPUs. Weights are already
+# projected onto their grid (so a ternary weight still only has 3 distinct
+# values); they are only *represented* as int8 for the fast kernel. This makes
+# the measured inference latency reflect real low-bit speedup instead of the
+# fake float32-rounded path used during training (which needs gradients).
+# ---------------------------------------------------------------------------
+
+def _int8_binary_matmul(a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
+    """a: [M,K] int8, b: [K,N] int8 -> [M,N] int32 (real int8 tensor-core kernel).
+
+    torch._int_mm requires M > 16 and K, N as multiples of 8 (built for
+    LLM-style batching). RL acts on single samples with arbitrary widths, so we
+    zero-pad M / K / N to the kernel constraints and slice the result back —
+    the matmul is still a genuine int8 tensor-core operation.
+    """
+    if a.is_cuda:
+        m, k = a.shape
+        n = b.shape[1]
+        pm = max(m, 17)
+        pk = ((k + 7) // 8) * 8
+        pn = ((n + 7) // 8) * 8
+        if pm != m or pk != k:
+            a = F.pad(a, (0, pk - k, 0, pm - m))
+        if pk != k or pn != n:
+            b = F.pad(b, (0, pn - n, 0, pk - k))
+        y = torch._int_mm(a.contiguous(), b.contiguous())
+        return y[:m, :n]
+    # CPU fallback (correct, but no tensor-core speedup): emulate int arithmetic.
+    return (a.to(torch.int32) @ b.to(torch.int32))
+
+
+def quantize_int8(x: torch.Tensor, channel_dim: Optional[int], reduce: str = "amax"):
+    """Symmetric signed int8 quant. Returns (q: int8, scale: fp32 scalar or [.,1])."""
+    qmax = 127
+    scale = _channel_scale(x, channel_dim, reduce) / qmax
+    q = torch.round(x / scale).clamp(-127, 127).to(torch.int8)
+    return q, scale
+
+
+def lowbit_real_matmul(
+    x: torch.Tensor,
+    weight: torch.Tensor,
+    bias: Optional[torch.Tensor],
+) -> torch.Tensor:
+    """Genuine int8 x int8 matmul with per-output-channel weight scale.
+
+    x: [..., in] fp32, weight: [out, in] fp32 (grid-projected), bias: [out].
+    Returns y: [..., out] fp32.
+    """
+    x_2d = x.reshape(-1, x.shape[-1]) if x.ndim > 2 else x
+    qx, sx = quantize_int8(x_2d, channel_dim=None)           # [batch, in], scalar
+    qw, sw = quantize_int8(weight, channel_dim=0)            # [out, in], [out, 1]
+    y_int = _int8_binary_matmul(qx, qw.t())                  # [batch, out] int32
+    scale_out = (sx.float() * sw.float()).t()                # [1, out]
+    y = (y_int.float() * scale_out)                          # [batch, out] fp32
+    if bias is not None:
+        y = y + bias
+    return y
+
+
+def model_macs(
+    state_dim: int,
+    hidden_size: int,
+    n_hidden_layers: int,
+    action_dim: int,
+) -> int:
+    """Multiply-accumulate operations for a single forward pass (batch=1, B2).
+
+    Each MLP layer (in -> out) costs `in*out` MACs; feeds the FLOPs metric that
+    normalizes capacity across precision x hidden-size combinations so the
+    Pareto comparison compares real compute cost, not raw neuron count.
+    """
+    macs = state_dim * hidden_size
+    for _ in range(max(n_hidden_layers - 1, 0)):
+        macs += hidden_size * hidden_size
+    macs += hidden_size * action_dim
+    return macs
+
+
+def model_flops(state_dim: int, hidden_size: int, n_hidden_layers: int, action_dim: int) -> float:
+    """FLOPs per forward pass = 2 * MACs (multiply + add)."""
+    return 2.0 * model_macs(state_dim, hidden_size, n_hidden_layers, action_dim)
+
+
+def effective_capacity_bits(n_params: int, bits: float) -> float:
+    """B2: parameter count weighted by stored bit-width (n_params * bits)."""
+    return n_params * bits
+
+
 def quantize_symmetric(
     x: torch.Tensor,
     bits: int,
@@ -136,6 +230,9 @@ class NativeBitLinear(nn.Module):
             bound = 1.0 / math.sqrt(in_features)
             nn.init.uniform_(self.bias, -bound, bound)
         self.project()
+        # When True, forward() uses the real int8 matmul kernel (B1) instead of
+        # the fake-quant STE path. Enabled for inference / latency benchmarks.
+        self.deploy = False
 
     def project(self) -> None:
         """Force stored parameters onto the target grid."""
@@ -149,6 +246,10 @@ class NativeBitLinear(nn.Module):
                 )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
+        if self.deploy:
+            # B1: real int8 tensor-core kernel for inference / latency benchmark.
+            with torch.no_grad():
+                return lowbit_real_matmul(x, self.weight, self.bias)
         weight = QuantizeSTE.apply(self.weight, self.precision, 0)
         bias = (
             QuantizeSTE.apply(self.bias, self.precision, None)
