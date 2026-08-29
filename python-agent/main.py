@@ -158,42 +158,68 @@ def _run_heldout_eval(
 
 def run_training(config: dict) -> None:
     native_cfg = config.get("native_precision") or {}
-    bits_list = native_cfg.get("bits")
-    if native_cfg.get("enabled") and bits_list:
-        from d2ql.precision import h4_capacity_plan, precision_bits
+    bits_list = native_cfg.get("bits") or []
+    precisions = native_cfg.get("precisions") or []  # [{precision, device?}, ...]
+    if native_cfg.get("enabled") and (bits_list or precisions):
+        from d2ql.precision import parse_precision, precision_bits, lookup_max_hidden
 
         lr_overrides = native_cfg.get("learning_rate_overrides") or {}
         capacity_cfg = native_cfg.get("capacity") or {}
         hidden_sizes = capacity_cfg.get("hidden_sizes") or [
             config["agent"].get("hidden_size", 256)
         ]
+        hidden_sizes = [int(h) for h in hidden_sizes]
         n_hidden_layers = int(
             capacity_cfg.get("n_hidden_layers", config["agent"].get("n_hidden_layers", 2))
         )
         max_hidden = capacity_cfg.get("max_hidden_size") or {}
-        plan = h4_capacity_plan(bits_list, hidden_sizes, max_hidden)
 
-        for name, hidden_size in plan:
+        # Plan: list of (precision, device, hidden). Device defaults to "auto"
+        # (CUDA if available). FP32 can appear on both GPU and CPU as distinct runs.
+        if precisions:
+            plan: list[tuple[str, str, int]] = []
+            for spec in precisions:
+                name = parse_precision(spec["precision"])
+                device = str(spec.get("device", "auto")).strip().lower()
+                cap = lookup_max_hidden(max_hidden, name)
+                for hidden in hidden_sizes:
+                    if cap is not None and hidden > cap:
+                        continue
+                    plan.append((name, device, hidden))
+        else:
+            plan = []
+            for raw in bits_list:
+                nm = parse_precision(raw)
+                cap = lookup_max_hidden(max_hidden, nm)
+                for h in hidden_sizes:
+                    if cap is not None and h > cap:
+                        continue
+                    plan.append((nm, "auto", h))
+
+        for name, device, hidden_size in plan:
             bits = precision_bits(name)
             run_config = deepcopy(config)
             run_config["agent"]["precision"] = name
             run_config["agent"]["hidden_size"] = hidden_size
             run_config["agent"]["n_hidden_layers"] = n_hidden_layers
+            run_config["agent"]["device"] = device
             if name in lr_overrides:
                 run_config["agent"]["learning_rate"] = lr_overrides[name]
             elif bits in lr_overrides:
                 run_config["agent"]["learning_rate"] = lr_overrides[bits]
             elif str(bits) in lr_overrides:
                 run_config["agent"]["learning_rate"] = lr_overrides[str(bits)]
-            tag = f"{name}_h{hidden_size}"
+            # Tag includes device so fp32-gpu and fp32-cpu are distinct runs.
+            tag = f"{name}_{device}_h{hidden_size}"
             base_ckpt = Path(config["training"]["checkpoint_dir"])
             run_config["training"]["checkpoint_dir"] = str(base_ckpt / tag)
             experiment_id = config.get("experiment", {}).get("id", "run")
             run_config.setdefault("experiment", {})["id"] = f"{experiment_id}_{tag}"
             logger.info(
-                "H4 run: %s (%.2f-bit) | hidden %d x %d",
+                "H4 run: %s (%.2f-bit, device=%s) | hidden %d x %d",
                 name,
                 bits,
+                device,
                 n_hidden_layers,
                 hidden_size,
             )
@@ -236,6 +262,8 @@ def _run_one_training(config: dict) -> None:
     latency_enabled = bool(latency_cfg.get("benchmark", True))
     latency_samples = int(latency_cfg.get("n_samples", 200))
     latency_warmup = int(latency_cfg.get("warmup", 20))
+    throughput_batch = int(latency_cfg.get("throughput_batch_size", 64))
+    throughput_n_batches = int(latency_cfg.get("throughput_n_batches", 200))
 
     experiment_id = config.get("experiment", {}).get("id", "run")
     run_stamp = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
@@ -481,6 +509,16 @@ def _run_one_training(config: dict) -> None:
             warmup=latency_warmup,
         )
 
+    # Throughput-per-batch (the regime where low-bit kernels pay off). Runs the
+    # real deploy kernel on a batched forward and reports samples/sec.
+    throughput = {"samples_per_sec": float("nan"), "batch_size": throughput_batch, "n_batches": throughput_n_batches}
+    if latency_enabled:
+        throughput = agent.benchmark_throughput(
+            state_dim=env.observation_space.shape[0],
+            batch_size=throughput_batch,
+            n_batches=throughput_n_batches,
+        )
+
     wall_clock_s = _time.perf_counter() - wall_start
 
     # B2 / C2: compute-cost and per-step-normalized reward axes for the Pareto.
@@ -515,6 +553,8 @@ def _run_one_training(config: dict) -> None:
         latency_p50_ms=latency["p50_ms"],
         latency_p95_ms=latency["p95_ms"],
         latency_n_samples=latency["n_samples"],
+        throughput_pps=throughput["samples_per_sec"],
+        throughput_batch_size=throughput["batch_size"],
         params=params,
         packed_size_mb=packed_size_mb(params, precision_name),
         flops=agent.flops(),

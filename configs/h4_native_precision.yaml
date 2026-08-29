@@ -79,6 +79,9 @@ latency:
   benchmark: true
   n_samples: 200
   warmup: 20
+  # Batched deploy throughput (samples/sec) — the regime where low-bit kernels pay off.
+  throughput_batch_size: 64
+  throughput_n_batches: 200
 
 # Where per-combination results are aggregated for later comparison.
 results:
@@ -95,24 +98,28 @@ reward:
   w_energy_init: 0.3
   w_cost_init: 0.3
 
-# Train a separate agent from scratch at each bit-width.
+# Low-precision native training (not post-quantization). Four deployment-typed
+# precisions: fp32 & fp16 train/infer on CUDA; fp32 & int8 on CPU. Each gets the
+# full capacity sweep; every run reports training latency, inference latency and
+# held-out reward. int4/ternary are retired from the sweep.
 native_precision:
   enabled: true
-  bits: [ternary, 4, 8, 16, 32]
   quantize_activations: true
+  precisions:
+    - {precision: 32, device: cuda, label: fp32-gpu}
+    - {precision: 16, device: cuda, label: fp16-gpu}
+    - {precision: 32, device: cpu,  label: fp32-cpu}
+    - {precision: 8,  device: cpu,  label: int8-cpu}
   learning_rate_overrides:
-    ternary: 0.00005
-    4: 0.0001
     8: 0.0002
     16: 0.0003
     32: 0.0005
-  # Shared starting width, then scale up. Higher precision stops earlier.
+  # Capacity exploration per precision. Higher hidden sizes are dropped only for
+  # precisions that would be impractically slow on their deployment device.
   capacity:
     hidden_sizes: [256, 512, 1024, 2048, 4096]
     n_hidden_layers: 2
     max_hidden_size:
-      32: 256
-      16: 512
-      8: 1024
-      4: 2048
-      ternary: 4096
+      32: 2048    # fp32 on CPU becomes too slow beyond 2048
+      16: 4096
+      8: 4096

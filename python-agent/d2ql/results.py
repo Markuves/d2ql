@@ -45,6 +45,9 @@ class RunResult:
     latency_p50_ms: float
     latency_p95_ms: float
     latency_n_samples: int
+    # Batched deploy throughput (samples/sec) — the regime where low-bit helps.
+    throughput_pps: float
+    throughput_batch_size: int
     params: int
     packed_size_mb: float
     # B2: compute-cost normalization axes so the Pareto compares real cost.
@@ -89,6 +92,8 @@ class RunResult:
             "latency_p50_ms",
             "latency_p95_ms",
             "latency_n_samples",
+            "throughput_pps",
+            "throughput_batch_size",
             "params",
             "packed_size_mb",
             "flops",

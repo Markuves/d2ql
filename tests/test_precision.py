@@ -82,3 +82,40 @@ def test_set_deploy_toggles_all_grid_layers():
     for layer in (layer1, layer2):
         layer.deploy = True
     assert layer1.deploy and layer2.deploy
+
+
+# ---------------------------------------------------------------------------
+# CPU 1-bit binary bit-packed kernel
+# ---------------------------------------------------------------------------
+
+def test_binary_matmul_matches_sign_matmul():
+    # The 1-bit packed (XOR + popcount) kernel must reproduce a sign matmul exactly.
+    from d2ql.kernels import binary_network_forward, pack_binary_bits, word_masks
+
+    torch.manual_seed(0)
+    s, h, a = 9, 64, 4
+    w1 = (torch.randn(h, s) - 0.5) * 2
+    b1 = torch.randn(h) * 0.1
+    w2 = (torch.randn(a, h) - 0.5) * 2
+    b2 = torch.randn(a) * 0.1
+
+    def sig(t):
+        return torch.where(t > 0, torch.ones_like(t), -torch.ones_like(t))
+
+    def ref(x):
+        y = sig(x) @ sig(w1).t() + b1
+        y = sig(y) @ sig(w2).t() + b2
+        return y
+
+    weights = [
+        (pack_binary_bits(sig(w1).float()), b1, word_masks(s)),
+        (pack_binary_bits(sig(w2).float()), b2, word_masks(h)),
+    ]
+    x = torch.rand(7, s)
+    got = binary_network_forward(x, weights)
+    torch.testing.assert_close(
+        torch.from_numpy(got).float(),
+        ref(x),
+        rtol=0.0,
+        atol=1e-3,
+    )

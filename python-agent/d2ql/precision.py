@@ -13,6 +13,7 @@ The Q-network is instantiated and updated at a chosen precision.
 from __future__ import annotations
 
 import math
+import os
 from typing import Optional
 
 import torch
@@ -123,7 +124,7 @@ def lowbit_real_matmul(
     weight: torch.Tensor,
     bias: Optional[torch.Tensor],
 ) -> torch.Tensor:
-    """Genuine int8 x int8 matmul with per-output-channel weight scale.
+    """Genuine int8 x int8 matmul via torch._int_mm with per-channel weight scale.
 
     x: [..., in] fp32, weight: [out, in] fp32 (grid-projected), bias: [out].
     Returns y: [..., out] fp32.
@@ -137,6 +138,39 @@ def lowbit_real_matmul(
     if bias is not None:
         y = y + bias
     return y
+
+
+_LOWBIT_BACKEND: str | None = None
+
+
+def _lowbit_backend() -> str:
+    """Resolve the deploy low-bit backend (env ``D2QL_LOWBIT_BACKEND``).
+
+    ``int_mm`` (default) -> torch._int_mm path: robust and exact for real
+    quantized weights. ``triton`` -> hand-written Triton kernel (experimental):
+    it is measurably the fastest low-bit option but rely on Triton 3.2's
+    ``tl.dot`` int8, which is unreliable for large int8 magnitudes; use only for
+    workloads with small activations/weights.
+    """
+    global _LOWBIT_BACKEND
+    if _LOWBIT_BACKEND is None:
+        _LOWBIT_BACKEND = os.environ.get("D2QL_LOWBIT_BACKEND", "int_mm").strip().lower()
+    return _LOWBIT_BACKEND
+
+
+def lowbit_deploy_matmul(
+    x: torch.Tensor,
+    weight: torch.Tensor,
+    bias: Optional[torch.Tensor],
+) -> torch.Tensor:
+    """Deploy low-bit matmul, dispatching to the selected backend (B1)."""
+    if _lowbit_backend() == "triton":
+        try:
+            from d2ql.kernels import lowbit_matmul_triton
+            return lowbit_matmul_triton(x, weight, bias)
+        except Exception:
+            pass  # fall through to int_mm
+    return lowbit_real_matmul(x, weight, bias)
 
 
 def model_macs(
@@ -247,9 +281,10 @@ class NativeBitLinear(nn.Module):
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         if self.deploy:
-            # B1: real int8 tensor-core kernel for inference / latency benchmark.
+            # B1: real low-bit kernel for inference / latency benchmark.
+            # Dispatch to the selected backend (Triton by default, int_mm fallback).
             with torch.no_grad():
-                return lowbit_real_matmul(x, self.weight, self.bias)
+                return lowbit_deploy_matmul(x, self.weight, self.bias)
         weight = QuantizeSTE.apply(self.weight, self.precision, 0)
         bias = (
             QuantizeSTE.apply(self.bias, self.precision, None)

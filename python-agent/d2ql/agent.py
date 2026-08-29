@@ -139,6 +139,8 @@ class DDQNAgent:
         self.state_dim = state_dim
         self.action_dim = action_dim
         self.config = config
+        # Device override (per-precision deployment target): "cuda" | "cpu" | "auto".
+        requested_device = str(config["agent"].get("device", "auto")).strip().lower()
         cuda_ok = False
         cuda_error = None
         try:
@@ -148,10 +150,21 @@ class DDQNAgent:
         except Exception as exc:
             cuda_ok = False
             cuda_error = exc
-        self.device = torch.device("cuda" if cuda_ok else "cpu")
+        if requested_device == "cuda":
+            if not cuda_ok:
+                logger.warning(
+                    "Requested device 'cuda' unavailable (%s); falling back to CPU.",
+                    cuda_error,
+                )
+            self.device = torch.device("cuda" if cuda_ok else "cpu")
+        elif requested_device == "cpu":
+            self.device = torch.device("cpu")
+        else:  # "auto" or anything else -> pick CUDA if present
+            self.device = torch.device("cuda" if cuda_ok else "cpu")
         logger.info(
-            "Torch device: %s | cuda_available=%s | device_count=%d | torch=%s",
+            "Torch device: %s (requested=%s) | cuda_available=%s | device_count=%d | torch=%s",
             self.device,
+            requested_device,
             cuda_ok,
             torch.cuda.device_count() if cuda_ok else 0,
             torch.__version__,
@@ -326,6 +339,55 @@ class DDQNAgent:
             "p50_ms": p50_ms,
             "p95_ms": p95_ms,
             "n_samples": n_samples,
+        }
+
+    def benchmark_throughput(
+        self,
+        state_dim: int,
+        batch_size: int = 64,
+        n_batches: int = 200,
+        warmup: int = 20,
+    ) -> dict:
+        """Measure batched throughput (samples/second) through the real kernel.
+
+        While ``benchmark_inference`` reports single-sample latency, low-bit
+        kernels (int_mm / Triton) only pay off under batching, so deploy
+        throughput is the honest secondary metric. Runs in deploy mode (real
+        kernel) on the agent's device.
+        """
+        import time as _time
+
+        self.online_net.eval()
+        self.online_net.set_deploy(True)
+        inp = torch.zeros(batch_size, state_dim, dtype=self.param_dtype, device=self.device)
+        with torch.no_grad():
+            for _ in range(max(warmup, 1)):
+                self.online_net(inp)
+        if self.device.type == "cuda":
+            torch.cuda.synchronize()
+
+        t0 = _time.perf_counter()
+        with torch.no_grad():
+            for _ in range(max(n_batches, 1)):
+                self.online_net(inp)
+        if self.device.type == "cuda":
+            torch.cuda.synchronize()
+        elapsed = max(_time.perf_counter() - t0, 1e-9)
+
+        samples_per_sec = batch_size * n_batches / elapsed
+        ms_per_batch = elapsed / max(n_batches, 1) * 1000.0
+        self.online_net.set_deploy(False)
+        logger.info(
+            "Throughput benchmark (precision=%s, device=%s): batch=%d -> %.0f samples/s "
+            "(%.3f ms/batch over %d batches)",
+            self.precision_name, self.device.type, batch_size,
+            samples_per_sec, ms_per_batch, n_batches,
+        )
+        return {
+            "samples_per_sec": samples_per_sec,
+            "ms_per_batch": ms_per_batch,
+            "batch_size": batch_size,
+            "n_batches": n_batches,
         }
 
     def select_action(self, state: np.ndarray, evaluate: bool = False) -> int:

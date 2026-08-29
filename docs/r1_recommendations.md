@@ -7,21 +7,51 @@
 | A1 — energía delta por paso | ✔ hecho (reward.py, env.py, main.py) |
 | A2 — SLA contado una vez por cloudlet | ✔ hecho (SimulationGateway.java) |
 | A3 — renombrar migración muerta (solo nombre) | ✔ hecho (penalty y plumbing eliminados; no se implementó migración real) |
-| B1 — kernel real de bajo bit (opción 1) | ✔ hecho (`torch._int_mm`, precision.py + modo deploy). **Hallazgo**: en GPU de consumo (sm 8.6) con estos tamaños de red es ~7x MÁS LENTO que fp32; ver nota abajo. |
+| B1 — kernel real de bajo bit (opción 1) | ✔ hecho. Añadido también **throughput por batch** como métrica y **kernels propios (Triton)** testados contra `int_mm`. Ver Nota B1. |
 | B2 — normalizar capacidad (FLOPs y capacidad efectiva) | ✔ hecho (precision.py, agent.py, results.py) |
 | C1 — evaluación held-out + métricas de negocio | ✔ hecho (main.py, workload.py, config h4) |
 | C2 — recompensa normalizada por pasos (`avg_steps`, `norm_reward`) | ✔ hecho (main.py, results.py) |
 | C3 — coste descorrelacionado de energía | ✔ hecho (SimulationGateway.java) |
+| Métrica adicional: **throughput por batch** | ✔ hecho (`agent.benchmark_throughput`, campos `throughput_pps`/`throughput_batch_size` en results; config `latency.throughput_batch_size`) |
+| Experimentación de **kernels propios** (≤5 configs) | ✔ hecho (`d2ql/kernels.py` + `scripts/benchmark_kernels.py`) |
 
-**Nota B1 (lectura honesta).** El kernel real int8 está implementado con `torch._int_mm`
-(padding M/K/N para cumplir sus requisitos) y es matemáticamente correcto (error máx ~0.002).
-Sin embargo, medido en esta GPU de consumo a batch=1 el camino int8 es más lento que fp32
-(0.75 ms vs 0.10 ms) porque `torch._int_mm` no está afinado para matrices pequeñas y el padding
-infla la carga. Implicación para el Pareto: la "precisión" rejilla (4/8/ternary) NO reportará
-menor latencia que fp32 en este hardware; fp16 sí es real (FP16 nativo). Si se quiere que la
-precisión baje la latencia de verdad, el camino realista es (a) enmarcar la eficiencia por
-`packed_size`/despliegue edge, (b) medir throughput en batch grande, o (c) kernels int4/ternary
-propios — un esfuerzo de ingeniería notable.
+**Nota B1 (lectura honesta).** El kernel real int8 está implementado (vía `torch._int_mm`
+default, con padding M/K/N) y es correcto (error máx ~0.002). Medido en esta GPU de consumo,
+a batch=1 el camino int8 es más lento que fp32 (0.75 ms vs 0.10 ms); `torch._int_mm` no está
+afinado para matrices pequeñas y el padding infla la carga. Implicación: la precisión rejilla
+(4/8/ternary) NO reportará menor latencia que fp32 a muestra única; fp16 sí (nativo).
+
+**Exploración de kernels propios (resultado).** Se escribió un kernel Triton int8 (acepta
+cualquier `M`, sin padding de batch; BLOCK_K forzado a K por un bug de acumulación multi-K de
+`tl.dot` int8 en Triton 3.2) y se barrió 5 configs de tile/warps contra `int_mm` y `fp32` en la
+red de 3 capas (`scripts/benchmark_kernels.py`):
+
+- El kernel Triton es **marginalmente más rápido que `int_mm`** en todo batch (~2-8%);
+- pero ambos son **~6x más lentos que fp32** a cualquier batch en este hardware/escala
+  (fp32 cuBLAS gana por amplio margen incluso a batch 512);
+- además, Triton 3.2 `tl.dot` int8 corrompe con **valores int8 grandes** (pesos cuantizados
+  reales ±127), por lo que `int_mm` sigue siendo el backend **robusto** por defecto.
+
+Conclusión operativa: el throughput por batch ya se mide e integra (`throughput_pps`), pero en
+este hardware la baja precisión no compensa; el backend por defecto es `int_mm` y se puede forzar
+Triton experimental con `D2QL_LOWBIT_BACKEND=triton` (solo con activaciones pequeñas).
+
+**Diseño final del experimento (sweep activo, `configs/h4_native_precision.yaml`).** Se fijó un
+conjunto de **4 precisiones tipadas por device**, con exploración de capacidad para cada una y
+reporte de latencia de entrenamiento, latencia de inferencia (single-sample + batch) y reward
+held-out:
+
+| Precisión | device | hidden_sizes (cap) |
+|-----------|--------|--------------------|
+| fp32 (`32`) | **cuda** | 256·512·1024·2048 |
+| fp16 (`16`) | **cuda** | 256·512·1024·2048·4096 |
+| fp32 (`32`) | **cpu** | 256·512·1024·2048 |
+| int8 (`8`)  | **cpu** | 256·512·1024·2048·4096 |
+
+18 runs en total; cada uno con tag `{precision}_{device}_h{hidden}`, entrenamiento nativo de baja
+precisión (STE, no post-cuantización), device respetado por el agente (`agent.device`), y métricas
+en el CSV: `wall_clock_s` (entrenamiento), `latency_*` + `throughput_pps` (inferencia) y `eval_*`
+reward/SLA/makespan. int4/ternary quedan retirados del sweep (código conservado en `precision.py`).
 
 **Contexto.** El proyecto usa CloudSimPlus (vía Py4J) para simular un centro de datos cloud y
 una red DDQL (Double DQN) que aprende a hacer *load balancing*. La meta explorada es buscar el
