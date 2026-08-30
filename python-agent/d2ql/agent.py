@@ -87,8 +87,13 @@ class PrioritizedReplayBuffer:
         self.priorities = np.zeros((capacity,), dtype=np.float32)
         
     def push(self, state, action, reward, next_state, done):
-        max_prio = self.priorities.max() if self.buffer else 1.0
-        
+        if self.buffer:
+            max_prio = np.nanmax(self.priorities)
+            if not np.isfinite(max_prio) or max_prio <= 0.0:
+                max_prio = 1.0
+        else:
+            max_prio = 1.0
+
         if len(self.buffer) < self.capacity:
             self.buffer.append((state, action, reward, next_state, done))
         else:
@@ -102,20 +107,30 @@ class PrioritizedReplayBuffer:
             prios = self.priorities
         else:
             prios = self.priorities[:len(self.buffer)]
-            
-        probs = prios ** self.alpha
-        probs /= probs.sum()
-        
+
+        # Robust priority->probability in float64. An ill-conditioned priority
+        # (e.g. inf/NaN from fp16 overflow during native low-bit training) used
+        # to make `prios ** alpha` inf and `inf/inf` NaN, crashing
+        # np.random.choice. Fall back to uniform sampling if the probs are bad.
+        probs = prios.astype(np.float64) ** self.alpha
+        probs = np.where(np.isfinite(probs), probs, 0.0)
+        s = probs.sum()
+        if not np.isfinite(s) or s <= 0.0:
+            probs = np.ones(len(prios), dtype=np.float64) / max(len(prios), 1)
+        else:
+            probs /= s
+
         indices = np.random.choice(len(self.buffer), batch_size, p=probs)
         samples = [self.buffer[idx] for idx in indices]
-        
+
         # Compute Importance Sampling weights to correct bias
         total = len(self.buffer)
-        weights = (total * probs[indices]) ** (-beta)
-        weights /= weights.max() # Normalize weights
-        
+        chosen = np.clip(probs[indices], 1e-8, 1.0)  # avoid 0 -> inf on **(-beta)
+        weights = (total * chosen) ** (-beta)
+        weights /= weights.max()  # Normalize weights
+
         states, actions, rewards, next_states, dones = zip(*samples)
-        
+
         return (
             np.array(states, dtype=np.float32),
             np.array(actions, dtype=np.int64),
@@ -125,10 +140,14 @@ class PrioritizedReplayBuffer:
             np.array(weights, dtype=np.float32),
             indices
         )
-        
+
     def update_priorities(self, batch_indices, batch_priorities):
-        for idx, prio in zip(batch_indices, batch_priorities):
-            self.priorities[idx] = max(prio, 1e-6) # Ensure non-zero priority
+        # Sanitize so priorities never become inf/NaN and poison the whole buffer.
+        bp = np.asarray(batch_priorities, dtype=np.float64)
+        bp = np.where(np.isfinite(bp), bp, 0.0)
+        bp = np.clip(bp, 1e-6, 1e6)
+        for idx, prio in zip(batch_indices, bp):
+            self.priorities[idx] = prio
 
     def __len__(self) -> int:
         return len(self.buffer)
@@ -206,10 +225,16 @@ class DDQNAgent:
         native_cfg = config.get("native_precision") or {}
         self.precision_name = parse_precision(config["agent"].get("precision", "32"))
         self.bits = precision_bits(self.precision_name)
-        self.param_dtype = compute_dtype(self.precision_name)
         self.quantize_activations = bool(native_cfg.get("quantize_activations", True))
         self.hidden_size = int(config["agent"].get("hidden_size", 256))
         self.n_hidden_layers = int(config["agent"].get("n_hidden_layers", 2))
+
+        # fp16 runs use AMP (autocast fp16 + GradScaler) over fp32 master weights
+        # — native fp16 params are incompatible with GradScaler, which needs fp32
+        # master grads. Grid precisions (int8/4/ternary) and fp32 compute in fp32,
+        # so no underflow; the scaler is a harmless no-op there.
+        self.use_amp = (self.precision_name == "16" and self.device.type == "cuda")
+        self.param_dtype = torch.float32 if self.use_amp else compute_dtype(self.precision_name)
 
         # Networks live at the configured bit-width from initialization (H4).
         self.online_net = QNetwork(
@@ -241,6 +266,9 @@ class DDQNAgent:
         )
 
         self.optimizer = optim.Adam(self.online_net.parameters(), lr=config["agent"]["learning_rate"])
+        # AMP GradScaler: avoids fp16 gradient underflow/overflow (fp16 runs).
+        # On fp32 / grid (int8/4/ternary) compute it is a harmless no-op.
+        self.scaler = torch.amp.GradScaler("cuda") if self.device.type == "cuda" else None
         self.memory = PrioritizedReplayBuffer(
             config["agent"]["replay_buffer_capacity"], 
             alpha=config["agent"]["per_alpha"] # default 0.6
@@ -290,7 +318,7 @@ class DDQNAgent:
         # Warm up any CUDA kernels / graph before timing.
         with torch.no_grad():
             for _ in range(warmup):
-                self.online_net(dummy)
+                self._cast_fwd(self.online_net, dummy)
 
         timings_ms: list[float] = []
         if self.device.type == "cuda":
@@ -302,7 +330,7 @@ class DDQNAgent:
                 end = torch.cuda.Event(enable_timing=True)
                 start.record()
                 with torch.no_grad():
-                    self.online_net(dummy)
+                    self._cast_fwd(self.online_net, dummy)
                 end.record()
                 torch.cuda.synchronize()
                 timings_ms.append(start.elapsed_time(end))
@@ -312,7 +340,7 @@ class DDQNAgent:
             for _ in range(n_samples):
                 t0 = time.perf_counter()
                 with torch.no_grad():
-                    self.online_net(dummy)
+                    self._cast_fwd(self.online_net, dummy)
                 timings_ms.append((time.perf_counter() - t0) * 1000.0)
 
         timings_ms.sort()
@@ -362,14 +390,14 @@ class DDQNAgent:
         inp = torch.zeros(batch_size, state_dim, dtype=self.param_dtype, device=self.device)
         with torch.no_grad():
             for _ in range(max(warmup, 1)):
-                self.online_net(inp)
+                self._cast_fwd(self.online_net, inp)
         if self.device.type == "cuda":
             torch.cuda.synchronize()
 
         t0 = _time.perf_counter()
         with torch.no_grad():
             for _ in range(max(n_batches, 1)):
-                self.online_net(inp)
+                self._cast_fwd(self.online_net, inp)
         if self.device.type == "cuda":
             torch.cuda.synchronize()
         elapsed = max(_time.perf_counter() - t0, 1e-9)
@@ -397,12 +425,19 @@ class DDQNAgent:
             
         state_tensor = torch.tensor(state, dtype=self.param_dtype, device=self.device).unsqueeze(0)
         with torch.no_grad():
-            q_values = self.online_net(state_tensor)
+            q_values = self._cast_fwd(self.online_net, state_tensor)
             return int(q_values.argmax(dim=1).item())
 
     def update_target_network(self) -> None:
         """Performs a hard parameter copy from Online Network to Target Network."""
         self.target_net.load_state_dict(self.online_net.state_dict())
+
+    def _cast_fwd(self, net: nn.Module, x: torch.Tensor) -> torch.Tensor:
+        """Run a forward pass, enabling fp16 autocast for AMP (16-bit) runs."""
+        if self.use_amp:
+            with torch.autocast("cuda", dtype=torch.float16):
+                return net(x)
+        return net(x)
 
     def train_step(self, episode_idx: int) -> float:
         """Executes a single DDQN backpropagation update step with PER."""
@@ -425,37 +460,46 @@ class DDQNAgent:
         weights = torch.tensor(weights, dtype=self.param_dtype, device=self.device)
         
         # 1. Compute current Q-values: Q(s_t, a_t; theta)
-        q_values = self.online_net(states)
+        q_values = self._cast_fwd(self.online_net, states)
         state_action_values = q_values.gather(1, actions.unsqueeze(1)).squeeze(1)
         
         # 2. Double DQN Target Calculation
         with torch.no_grad():
             # Find best action on next state using Online parameters: argmax_a Q(s_{t+1}, a; theta)
-            next_state_actions = self.online_net(next_states).argmax(dim=1)
+            next_state_actions = self._cast_fwd(self.online_net, next_states).argmax(dim=1)
             # Evaluate that action using Target parameters: Q(s_{t+1}, a*; theta^-)
-            next_q_values = self.target_net(next_states)
+            next_q_values = self._cast_fwd(self.target_net, next_states)
             next_state_values = next_q_values.gather(1, next_state_actions.unsqueeze(1)).squeeze(1)
             # Double Q TD Target
             expected_state_action_values = rewards + (self.gamma * next_state_values * (1.0 - dones))
             
         # 3. Compute loss and prioritize experiences
-        td_errors = torch.abs(state_action_values - expected_state_action_values)
-        
-        # Importance-weighted Mean Squared Error (MSE) Loss
-        loss = (weights * (state_action_values - expected_state_action_values) ** 2).mean()
-        
-        # Backpropagation
+        diff = (state_action_values - expected_state_action_values).float()  # fp32, stable
+        td_errors = diff.abs()
+
+        # Importance-weighted Mean Squared Error (MSE) Loss (computed in fp32)
+        loss = (weights.float() * diff ** 2).mean()
+
+        # Backpropagation (gradient-scaled when on CUDA to avoid fp16/int8 underflow)
         self.optimizer.zero_grad()
-        loss.backward()
-        
+        if self.scaler is not None:
+            self.scaler.scale(loss).backward()
+            self.scaler.unscale_(self.optimizer)  # unscale before grad clip sees real norms
+        else:
+            loss.backward()
+
         # Apply strict gradient clipping to prevent weight saturation under multi-objective reward shifts
         nn.utils.clip_grad_norm_(self.online_net.parameters(), max_norm=self.grad_clip)
-        self.optimizer.step()
+        if self.scaler is not None:
+            self.scaler.step(self.optimizer)
+            self.scaler.update()
+        else:
+            self.optimizer.step()
         if self.precision_name in GRID_PRECISIONS:
             project_native_parameters(self.online_net)
 
         # Update priorities in buffer using absolute TD Errors
-        new_priorities = td_errors.detach().float().cpu().numpy() + 1e-6
+        new_priorities = td_errors.detach().cpu().numpy() + 1e-6
         self.memory.update_priorities(indices, new_priorities)
         
         self.total_steps += 1

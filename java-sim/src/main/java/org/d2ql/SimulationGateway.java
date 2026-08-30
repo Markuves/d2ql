@@ -62,6 +62,12 @@ public class SimulationGateway {
     // C3 fix: USD per watt-hour, differentiated per host index so cost objective
     // is decoupled from the single flat energy number.
     private static final double[] HOST_PRICE_PER_WATT = {0.048, 0.024, 0.048, 0.030};
+    // Linear server power model (Watts): idle floor + load-proportional term.
+    // CloudSimPlus hosts ship with a PowerModelNull by default (getPower -> 0),
+    // which made total energy and cost always zero. We compute power directly so
+    // the energy / cost objectives are real and learnable.
+    private static final double HOST_IDLE_WATT = 100.0;
+    private static final double HOST_MAX_WATT = 250.0;
 
     public SimulationGateway() {
         // Workload windows are pushed from Python per episode.
@@ -285,7 +291,12 @@ public class SimulationGateway {
         double stepCost = 0.0;
         for (int i = 0; i < hosts.size(); i++) {
             HostSimple host = hosts.get(i);
-            double power = host.getPowerModel().getPower(host.getCpuPercentUtilization());
+            double util = host.getCpuPercentUtilization();
+            if (Double.isNaN(util) || util < 0.0) util = 0.0;
+            if (util > 1.0) util = 1.0;
+            // Linear power model: idle 100W, +150W at full load. Independent of the
+            // (null by default) CloudSimPlus power model.
+            double power = HOST_IDLE_WATT + (HOST_MAX_WATT - HOST_IDLE_WATT) * util;
             stepEnergy += power;
             // C3: cost weights each host by its own price per watt, differing by index.
             double price = HOST_PRICE_PER_WATT[Math.min(i, HOST_PRICE_PER_WATT.length - 1)];

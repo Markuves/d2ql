@@ -250,7 +250,7 @@ def _run_one_training(config: dict) -> None:
     early_stopping_enabled = bool(es_cfg.get("enabled", True))
     if early_stopping_enabled:
         stopper = EarlyStopper(
-            patience=int(es_cfg.get("patience", 3)),
+            patience=int(es_cfg.get("patience", 20)),
             window_size=int(es_cfg.get("window_size", 3)),
             min_evaluations=int(es_cfg.get("min_evaluations", 4)),
             min_delta=float(es_cfg.get("min_delta", 1e-3)),
@@ -283,6 +283,7 @@ def _run_one_training(config: dict) -> None:
         episode_length=workload_cfg.get("episode_length", 50),
         seed=config["experiment"]["seed"],
         holdout_frac=float(workload_cfg.get("holdout_frac", 0.0)),
+        mi_scale=float(workload_cfg.get("mi_scale", 1000.0)),
     )
     logger.info("Workload summary: %s", trace_loader.summary())
 

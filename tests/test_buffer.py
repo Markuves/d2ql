@@ -81,3 +81,25 @@ def test_priorities_never_zero_after_update(buffer):
     buffer.update_priorities(indices, np.zeros(len(indices)))
     for idx in indices:
         assert buffer.priorities[idx] >= 1e-6
+
+
+def test_sample_survives_nan_inf_priorities():
+    # Regression: an inf/NaN priority must not crash np.random.choice(
+    # "probabilities contain NaN") and must not corrupt the whole buffer.
+    buf = PrioritizedReplayBuffer(capacity=100)
+    for i in range(64):
+        buf.push(np.zeros(3), i % 4, float(i), np.zeros(3), False)
+    # Poison priorities before sampling.
+    buf.priorities[:64] = np.array([float("nan"), float("inf"), 0.0, -5.0] * 16)
+    # sample() must not raise, return valid shapes, and stay finite.
+    states, actions, rewards, next_states, dones, weights, indices = buf.sample(16, beta=0.4)
+    assert states.shape == (16, 3)
+    assert actions.shape == (16,)
+    assert weights.shape == (16,)
+    assert np.isfinite(weights).all()
+    # update_priorities sanitizes the sampled indices (inf/NaN -> finite).
+    buf.update_priorities(indices, np.array([float("inf"), float("nan")] * 8))
+    assert np.isfinite(buf.priorities[indices]).all()
+    # And a second sample over the still-poisoned raw array must not crash.
+    _, _, _, _, _, weights2, _ = buf.sample(16, beta=0.4)
+    assert np.isfinite(weights2).all()

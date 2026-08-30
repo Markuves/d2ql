@@ -28,6 +28,10 @@ workload:
   # C1 fix: hold out the trailing fraction of episode windows for a clean,
   # unseen-workload evaluation after training.
   holdout_frac: 0.2
+  # Rescale cloudlet MI so each cloudlet finishes in <0.1s of simulated time
+  # (instead of ~2.6 days), making every episode terminate in seconds. Tuned to
+  # keep episodes fast even for long-tail cloudlets.
+  mi_scale: 0.1
 
 # C1 fix: deterministic, epsilon-free held-out evaluation (business metrics).
 evaluation:
