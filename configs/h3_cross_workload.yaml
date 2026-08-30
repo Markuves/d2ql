@@ -16,7 +16,7 @@ py4j:
   port: 25333
 
 workload:
-  trace_path: "data/workload.csv.gz"
+  trace_path: "prep/workload_clean.csv"
   episode_length: 50        # cloudlets per episode window
   shuffle: true             # H3: randomise window order each epoch
 

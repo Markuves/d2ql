@@ -1,0 +1,3 @@
+
+# Keep container entrypoints with Unix line endings (CRLF breaks the shebang on Linux)
+python-agent/entrypoint.sh text eol=lf

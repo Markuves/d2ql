@@ -58,7 +58,7 @@ DEFAULT_CONFIG = {
         "w_cost_init": 0.3,
     },
     "workload": {
-        "trace_path": "data/workload.csv.gz",
+        "trace_path": "prep/workload_clean.csv",
         "episode_length": 50,
         "shuffle": True,
     },
@@ -107,7 +107,7 @@ def run_training(config: dict) -> None:
     # Initialize workload trace loader
     workload_cfg = config.get("workload", {})
     trace_loader = AzureTraceLoader(
-        trace_path=workload_cfg.get("trace_path", "data/workload.csv.gz"),
+        trace_path=workload_cfg.get("trace_path", "prep/workload_clean.csv"),
         episode_length=workload_cfg.get("episode_length", 50),
         seed=config["experiment"]["seed"],
     )

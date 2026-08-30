@@ -34,9 +34,22 @@ dependency-reduced-pom.xml
 data/*
 !data/.gitkeep
 
-# Exclude training checkpoints and telemetry
-outputs/
+# Exclude the prep/ datasets (large raw + cleaned CSVs, ~2.4 GB).
+# The cleaned trace is mounted into the container at /app/prep via docker-compose.
 prep/workload_transformed.csv
 prep/workload_clean.csv
 prep/workload.csv
 prep/workload.csv.gz
+
+# Exclude training checkpoints and telemetry
+outputs/
+# Explicit paths produced by the H4 sweep (early stopping + results):
+outputs/checkpoints/
+outputs/tensorboard/
+outputs/results/
+
+# Python test / type / lint caches
+.coverage
+htmlcov/
+.ruff_cache/
+/graphify-out

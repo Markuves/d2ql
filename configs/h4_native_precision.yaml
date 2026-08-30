@@ -1,0 +1,125 @@
+experiment:
+  id: "h4_native_precision"
+  hypothesis: "H4"
+  seed: 42
+  description: >
+    Native bit-width training from initialization, with a shared capacity
+    sweep. Every precision starts at the same hidden width; larger widths
+    drop higher-precision models so they are not trained when they would
+    be too slow. Lower-precision models keep scaling width to test whether
+    extra neurons can match higher-precision quality at lower latency.
+
+    This is not H2 post-training quantization and not quantization-aware
+    training. INT4/INT8 live on a signed integer grid; ternary uses BitNet-style
+    weights in {-1, 0, +1}. 16/32 use native floating-point dtypes (no AMP).
+
+datacenter:
+  n_cloud_hosts: 4
+  n_edge_nodes: 0
+
+py4j:
+  host: "java-sim"
+  port: 25333
+
+workload:
+  trace_path: "prep/workload_clean.csv"
+  episode_length: 50
+  shuffle: false
+  # C1 fix: hold out the trailing fraction of episode windows for a clean,
+  # unseen-workload evaluation after training.
+  holdout_frac: 0.2
+
+# C1 fix: deterministic, epsilon-free held-out evaluation (business metrics).
+evaluation:
+  n_episodes: 10
+
+queue:
+  urgency_weight: 0.6
+  demand_weight: 0.4
+
+agent:
+  precision: "32"          # overridden per run from native_precision.bits
+  hidden_size: 256         # overridden per run from native_precision.capacity
+  n_hidden_layers: 2
+  learning_rate: 0.0005
+  gamma: 0.98
+  target_update_freq: 750
+  batch_size: 64
+  replay_buffer_capacity: 100_000
+  replay_buffer_warmup: 2000
+  gradient_clip_norm: 10.0
+  epsilon_start: 1.0
+  epsilon_end: 0.05
+  epsilon_decay: 0.995
+  per_alpha: 0.6
+  per_beta_start: 0.4
+  per_beta_end: 1.0
+
+training:
+  n_episodes: 600
+  eval_every_n_episodes: 50
+  checkpoint_dir: "outputs/checkpoints/h4"
+  tensorboard_dir: "outputs/tensorboard"
+
+# Stop each (precision, hidden_size) run as soon as its evaluation reward
+# plateaus, instead of always running the full n_episodes budget. The metric
+# is the mean reward over a trailing window of `window_size` evaluations;
+# after `patience` consecutive evaluations without a new best window we halt.
+early_stopping:
+  enabled: true
+  patience: 3            # evaluations to wait for improvement before stopping
+  window_size: 3         # evaluations averaged into the comparison metric
+  min_evaluations: 4     # never stop before this many evaluations
+  min_delta: 0.001       # min improvement to count as "better"
+
+# Model inference latency benchmark (forward pass only) after each run, so
+# latency is comparable across precision x capacity independently of the
+# Java simulator step time.
+latency:
+  benchmark: true
+  n_samples: 200
+  warmup: 20
+  # Batched deploy throughput (samples/sec) — the regime where low-bit kernels pay off.
+  throughput_batch_size: 64
+  throughput_n_batches: 200
+
+# Where per-combination results are aggregated for later comparison.
+results:
+  csv_dir: "outputs/results"
+
+reward:
+  target_utilization: 0.70
+  migration_penalty: 0.10
+  weight_lr: 0.01
+  w_perf_floor: 0.2
+  w_energy_floor: 0.1
+  w_cost_floor: 0.1
+  w_perf_init: 0.4
+  w_energy_init: 0.3
+  w_cost_init: 0.3
+
+# Low-precision native training (not post-quantization). Four deployment-typed
+# precisions: fp32 & fp16 train/infer on CUDA; fp32 & int8 on CPU. Each gets the
+# full capacity sweep; every run reports training latency, inference latency and
+# held-out reward. int4/ternary are retired from the sweep.
+native_precision:
+  enabled: true
+  quantize_activations: true
+  precisions:
+    - {precision: 32, device: cuda, label: fp32-gpu}
+    - {precision: 16, device: cuda, label: fp16-gpu}
+    - {precision: 32, device: cpu,  label: fp32-cpu}
+    - {precision: 8,  device: cpu,  label: int8-cpu}
+  learning_rate_overrides:
+    8: 0.0002
+    16: 0.0003
+    32: 0.0005
+  # Capacity exploration per precision. Higher hidden sizes are dropped only for
+  # precisions that would be impractically slow on their deployment device.
+  capacity:
+    hidden_sizes: [256, 512, 1024, 2048, 4096]
+    n_hidden_layers: 2
+    max_hidden_size:
+      32: 2048    # fp32 on CPU becomes too slow beyond 2048
+      16: 4096
+      8: 4096
