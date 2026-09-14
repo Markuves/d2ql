@@ -31,7 +31,7 @@ dependency-reduced-pom.xml
 
 # --- d2ql Project Telemetry and Data ---
 # Exclude raw workloads and datasets
-data/*
+
 !data/.gitkeep
 
 # Exclude the prep/ datasets (large raw + cleaned CSVs, ~2.4 GB).
