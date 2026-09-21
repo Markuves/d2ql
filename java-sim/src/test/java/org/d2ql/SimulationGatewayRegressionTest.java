@@ -1,5 +1,7 @@
 package org.d2ql;
 
+import org.cloudsimplus.hosts.HostSimple;
+import org.cloudsimplus.vms.VmSimple;
 import org.junit.jupiter.api.Test;
 import static org.junit.jupiter.api.Assertions.*;
 
@@ -19,7 +21,6 @@ public class SimulationGatewayRegressionTest {
         // First run
         gw.setSeed(seed);
         double[] obs1 = gw.reset();
-        // Fixed round-robin actions 0,1,2,3 repeated for 4 steps
         int[] actions = {0, 1, 2, 3};
         for (int a : actions) {
             gw.step(a);
@@ -36,12 +37,19 @@ public class SimulationGatewayRegressionTest {
         double makespan2 = gw.getMakespan();
         double sla2 = gw.getSlaViolationCount();
 
-        assertArrayEquals(obs1, obs2, 1e-6, "Same seed should produce identical observations");
-        assertEquals(makespan1, makespan2, 1e-6, "Same seed should produce identical makespan");
-        assertEquals(sla1, sla2, "Same seed should produce identical SLA violation count");
+        assertArrayEquals(obs1, obs2, 1e-6,
+            "Same seed must produce identical observations (load-bearing seed via gatewayRandom in createCloudlet)");
+        assertEquals(makespan1, makespan2, 1e-6,
+            "Same seed must produce identical makespan");
+        assertEquals(sla1, sla2,
+            "Same seed must produce identical SLA violation count");
 
-        // Verify explicit VM-to-host mapping is pinned
-        // (indirect: deterministic metrics confirm no broker randomness)
-        assertTrue(makespan1 >= 0, "Makespan must be non-negative");
+        // Explicit VM-to-host mapping assertion after startSync()
+        for (int i = 0; i < 4; i++) {
+            VmSimple vm = gw.getVms().get(i);
+            HostSimple host = (HostSimple) vm.getHost();
+            assertEquals(i, host.getId() % 4,
+                "VM index " + i + " must be pinned to host index i via VmAllocationPolicy");
+        }
     }
 }

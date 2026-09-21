@@ -76,8 +76,8 @@ class CloudSimEnv(gym.Env):
         episode_seed = int(self.config.get("experiment", {}).get("seed", 42))
         if seed is not None:
             episode_seed = int(seed)
-        if hasattr(self.sim, "setSeed"):
-            self.sim.setSeed(episode_seed)
+        # Call unconditionally: setSeed is always present on the gateway entry point.
+        self.sim.setSeed(episode_seed)
 
         if cloudlets:
             self.sim.clearWorkload()

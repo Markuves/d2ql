@@ -1,5 +1,6 @@
 package org.d2ql;
 
+import org.cloudsimplus.allocationpolicies.VmAllocationPolicySimple;
 import org.cloudsimplus.brokers.DatacenterBrokerSimple;
 import org.cloudsimplus.cloudlets.Cloudlet;
 import org.cloudsimplus.cloudlets.CloudletSimple;
@@ -158,10 +159,6 @@ public class SimulationGateway {
         return seed;
     }
 
-    public Random getGatewayRandom() {
-        return gatewayRandom;
-    }
-
     public double[] reset() {
         if (workloadRecords.isEmpty()) {
             loadWorkload();
@@ -213,16 +210,19 @@ public class SimulationGateway {
             hosts.add(host);
         }
 
-        datacenter = new DatacenterSimple(simulation, hosts);
+        // Custom allocation policy: pin VM index i -> host index i.
+        // Verified against CloudSimPlus 8.5.7 source: VmAllocationPolicySimple
+        // accepts a BiFunction<VmAllocationPolicy, Vm, Optional<Host>>.
+        VmAllocationPolicySimple pinnedPolicy = new VmAllocationPolicySimple(
+            (policy, vm) -> java.util.Optional.of(hosts.get((int)(vm.getId() % NUM_HOSTS)))
+        );
+        datacenter = new DatacenterSimple(simulation, hosts, pinnedPolicy);
         broker     = new DatacenterBrokerSimple(simulation);
 
-        // Build VMs and pin each VM i to host i explicitly (D2 fix).
-        // This removes dependence on broker allocation-policy randomness.
+        // Build VMs (no pre-start setHost; allocation policy handles placement).
         for (int i = 0; i < NUM_VMS; i++) {
             VmSimple vm = new VmSimple(HOST_MIPS, HOST_PES / 2);
             vm.setRam(HOST_RAM / 4).setBw(HOST_BW / 4).setSize(HOST_STORAGE / 4);
-            // Explicit mapping: VM index i -> host index i.
-            vm.setHost(hosts.get(i));
             vms.add(vm);
         }
         broker.submitVmList(vms);
@@ -261,6 +261,11 @@ public class SimulationGateway {
 
     public boolean isFinished() {
         return finished;
+    }
+
+    // Package-private accessor for regression tests.
+    List<VmSimple> getVms() {
+        return vms;
     }
 
     public double[] getHostCpuUtilizations() {
@@ -306,7 +311,10 @@ public class SimulationGateway {
         long mi = rec[2];
         int numPes = (int) Math.min(Math.max(rec[3], 1), HOST_PES / 2);
         CloudletSimple cl = new CloudletSimple(mi, numPes);
-        cl.setFileSize(300).setOutputSize(300);
+        // Load-bearing seed: gatewayRandom affects cloudlet file/output sizes,
+        // making the seed change simulation results deterministically.
+        int fileVariation = gatewayRandom.nextInt(10);
+        cl.setFileSize(300 + fileVariation).setOutputSize(300 + fileVariation);
         // CPU can saturate a VM; RAM/BW are shared so co-located cloudlets do not
         // each demand 100% of the VM (8192 MB / 2500 Mbps) and stall.
         cl.setUtilizationModelCpu(new UtilizationModelFull());
