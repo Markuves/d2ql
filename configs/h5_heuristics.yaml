@@ -1,0 +1,64 @@
+experiment:
+  id: "h5_heuristics"
+  hypothesis: "H5"
+  seed: 42
+  description: >
+    Baseline comparison: four traditional load-balancing heuristics evaluated
+    in the SAME CloudSim environment and on the SAME held-out workload as the
+    H4 DDQN agent. The heuristics collect the same business metrics (mean
+    reward, makespan, SLA violations/rate, energy, cost) plus their per-decision
+    latency, so the learned policy can be compared head-to-head with classic
+    baselines. Metrics are written to outputs/results/h5_results.csv.
+
+datacenter:
+  n_cloud_hosts: 4
+  n_edge_nodes: 0
+
+py4j:
+  host: "java-sim"
+  port: 25333
+
+# Must match the H4 workload settings (episode_length, holdout_frac, mi_scale,
+# seed) so the heuristics and the agent are evaluated on the identical held-out
+# windows.
+workload:
+  trace_path: "data/workload.csv.gz"
+  episode_length: 50
+  shuffle: false
+  holdout_frac: 0.2
+  mi_scale: 0.1
+
+# Same number of held-out episodes the H4 agent is evaluated on.
+evaluation:
+  n_episodes: 10
+
+queue:
+  urgency_weight: 0.6
+  demand_weight: 0.4
+
+# Fixed, non-adaptive reward weights used to score the heuristics. Kept at the
+# H4 initial weights so the reward is comparable; the weight-independent
+# business metrics (makespan/SLA/energy/cost) stay comparable regardless.
+reward:
+  target_utilization: 0.70
+  migration_penalty: 0.10
+  weight_lr: 0.01
+  w_perf_floor: 0.2
+  w_energy_floor: 0.1
+  w_cost_floor: 0.1
+  w_perf_init: 0.4
+  w_energy_init: 0.3
+  w_cost_init: 0.3
+
+# Traditional load-balancing baselines to sweep (no training).
+heuristics:
+  enabled: true
+  policies: [round_robin, random, least_loaded, least_combined]
+  seed: 42
+
+training:
+  checkpoint_dir: "outputs/checkpoints/h5"
+  tensorboard_dir: "outputs/tensorboard"
+
+results:
+  csv_dir: "outputs/results"

@@ -65,7 +65,6 @@ class RunResult:
     wall_clock_s: float
     device: str
     seed: int
-    notes: str = ""
     extra: dict = field(default_factory=dict)
 
     def to_csv_row(self) -> dict[str, Any]:
@@ -108,13 +107,102 @@ class RunResult:
             "wall_clock_s",
             "device",
             "seed",
-            "notes",
             "extra",
         ]
 
 
 def _csv_path(results_dir: Path) -> Path:
     return results_dir / "h4_results.csv"
+
+
+@dataclass
+class HeuristicResult:
+    """Result of evaluating one traditional load-balancing heuristic (H5).
+
+    Metrics mirror the H4 evaluation columns (held-out business metrics) so a
+    heuristic row can be compared head-to-head with a DDQN row.
+    """
+
+    experiment_id: str
+    policy: str
+    n_hosts: int
+    eval_episodes: int
+    eval_mean_reward: float
+    eval_makespan: float
+    eval_sla_violations: float
+    eval_sla_rate: float
+    mean_energy: float
+    mean_cost: float
+    decision_latency_mean_ms: float
+    decision_latency_p50_ms: float
+    decision_latency_p95_ms: float
+    wall_clock_s: float
+    seed: int
+    extra: dict = field(default_factory=dict)
+
+    def to_csv_row(self) -> dict[str, Any]:
+        row = asdict(self)
+        row["extra"] = json.dumps(row.get("extra", {}))
+        return row
+
+    @staticmethod
+    def csv_columns() -> list[str]:
+        return [
+            "experiment_id",
+            "policy",
+            "n_hosts",
+            "eval_episodes",
+            "eval_mean_reward",
+            "eval_makespan",
+            "eval_sla_violations",
+            "eval_sla_rate",
+            "mean_energy",
+            "mean_cost",
+            "decision_latency_mean_ms",
+            "decision_latency_p50_ms",
+            "decision_latency_p95_ms",
+            "wall_clock_s",
+            "seed",
+            "extra",
+        ]
+
+
+def _heuristic_csv_path(results_dir: Path) -> Path:
+    return results_dir / "h5_results.csv"
+
+
+def save_heuristic_result(result: HeuristicResult, checkpoint_dir: str, results_dir: str) -> None:
+    """Write result.json next to the checkpoint and append a row to h5_results.csv."""
+    ckpt = Path(checkpoint_dir)
+    ckpt.mkdir(parents=True, exist_ok=True)
+    out_dir = Path(results_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    result_path = ckpt / "result.json"
+    with open(result_path, "w") as f:
+        json.dump(asdict(result), f, indent=2, default=str)
+    logger.info("Heuristic result written to %s", result_path)
+
+    row = result.to_csv_row()
+    columns = HeuristicResult.csv_columns()
+    csv_file = _heuristic_csv_path(out_dir)
+    write_header = not csv_file.exists()
+    with _csv_write_lock:
+        with open(csv_file, "a", newline="") as f:
+            writer = csv.DictWriter(f, fieldnames=columns)
+            if write_header:
+                writer.writeheader()
+            writer.writerow({k: row.get(k, "") for k in columns})
+    logger.info("Aggregate heuristic results updated: %s", csv_file)
+
+
+def load_heuristic_results_csv(results_dir: str) -> list[dict]:
+    """Read the aggregate H5 heuristic CSV back into a list of row dicts."""
+    csv_file = _heuristic_csv_path(Path(results_dir))
+    if not csv_file.exists():
+        return []
+    with open(csv_file, "r", newline="") as f:
+        return list(csv.DictReader(f))
 
 
 def save_run_result(result: RunResult, checkpoint_dir: str, results_dir: str) -> None:

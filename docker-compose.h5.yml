@@ -1,0 +1,13 @@
+# Compose override to run the H5 heuristics experiment instead of the H4 sweep.
+#
+# Usage:
+#   docker compose -f docker-compose.yml -f docker-compose.h5.yml up -d
+#   docker compose -f docker-compose.yml -f docker-compose.h5.yml logs -f python-agent
+#
+# It only changes python-agent's command to the H5 config; every other service
+# (java-sim, tensorboard) and the volumes/GPU settings are inherited. The H5 run
+# is short (evaluates 4 heuristics over the held-out workload, no training) and
+# exits when done, leaving outputs/results/h5_results.csv.
+services:
+  python-agent:
+    command: ["python", "main.py", "--config", "configs/h5_heuristics.yaml"]

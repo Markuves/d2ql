@@ -156,7 +156,194 @@ def _run_heldout_eval(
     }
 
 
+def run_heuristics(config: dict) -> None:
+    """H5: evaluate traditional load-balancing heuristics (no learning)."""
+    h5 = config.get("heuristics") or {}
+    if not h5.get("enabled"):
+        return
+    policies = h5.get("policies") or [
+        "round_robin",
+        "random",
+        "least_loaded",
+        "least_combined",
+    ]
+    logger.info(
+        "H5 heuristics sweep: %d policies -> %s",
+        len(policies),
+        ", ".join(str(p) for p in policies),
+    )
+    for policy_name in policies:
+        _run_one_heuristic(config, str(policy_name))
+
+
+def _run_one_heuristic(config: dict, policy_name: str) -> None:
+    """Evaluate a single heuristic on the SAME held-out workload as H4.
+
+    Uses the identical CloudSim env, trace loader settings and RewardManager as
+    the DDQN runs, so makespan / SLA / energy / cost / reward are directly
+    comparable with the H4 agent rows.
+    """
+    import time as _time
+
+    from d2ql.env import CloudSimEnv
+    from d2ql.heuristics import build_heuristic
+    from d2ql.metrics import MetricsLogger
+    from d2ql.results import HeuristicResult, save_heuristic_result
+    from d2ql.reward import RewardManager
+    from d2ql.workload import AzureTraceLoader
+
+    training_cfg = config.get("training") or {}
+    base_ckpt = Path(training_cfg.get("checkpoint_dir", "outputs/checkpoints/h5"))
+    checkpoint_dir = base_ckpt / policy_name
+    checkpoint_dir.mkdir(parents=True, exist_ok=True)
+    results_dir = (config.get("results") or {}).get("csv_dir", "outputs/results")
+
+    seed = int(config["experiment"]["seed"])
+    h5 = config.get("heuristics") or {}
+    h5_seed = int(h5.get("seed", seed))
+    experiment_id = config.get("experiment", {}).get("id", "h5")
+
+    run_stamp = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
+    log_dir = (
+        Path(training_cfg.get("tensorboard_dir", "outputs/tensorboard"))
+        / f"{experiment_id}_{policy_name}"
+        / run_stamp
+    )
+    log_dir.mkdir(parents=True, exist_ok=True)
+    metrics = MetricsLogger(log_dir=str(log_dir))
+
+    workload_cfg = config.get("workload", {})
+    trace_loader = AzureTraceLoader(
+        trace_path=workload_cfg.get("trace_path", "data/workload.csv.gz"),
+        episode_length=workload_cfg.get("episode_length", 50),
+        seed=seed,
+        holdout_frac=float(workload_cfg.get("holdout_frac", 0.0)),
+        mi_scale=float(workload_cfg.get("mi_scale", 1000.0)),
+    )
+    logger.info(
+        "H5 heuristic '%s' | workload summary: %s", policy_name, trace_loader.summary()
+    )
+
+    n_hosts = int(config["datacenter"]["n_cloud_hosts"])
+    policy = build_heuristic(policy_name, n_hosts=n_hosts, seed=h5_seed)
+
+    n_eval = int((config.get("evaluation") or {}).get("n_episodes", 10))
+    eval_cloudlets = trace_loader.eval_episodes(n_eval)
+
+    logger.info("Initializing CloudSimEnv for heuristic '%s'...", policy_name)
+    env = CloudSimEnv(config)
+    # Fixed (initial) reward weights — heuristics do not adapt them. The
+    # weight-independent business metrics remain the fair comparison axis.
+    reward_manager = RewardManager(config)
+
+    total_reward = 0.0
+    total_cloudlets = 0
+    makespans: list[float] = []
+    energies: list[float] = []
+    costs: list[float] = []
+    decision_times: list[float] = []
+
+    wall_start = _time.perf_counter()
+    for cloudlets in eval_cloudlets:
+        obs, _ = env.reset(cloudlets=cloudlets)
+        policy.reset()
+        ep_reward = 0.0
+        terminated = False
+        truncated = False
+        info: dict = {}
+        while not (terminated or truncated):
+            t0 = _time.perf_counter()
+            action = policy.select_action(obs)
+            decision_times.append((_time.perf_counter() - t0) * 1000.0)
+            obs, _, terminated, truncated, info = env.step(action)
+            ep_reward += reward_manager.compute_step_reward(
+                energy_delta=info.get("energy_delta", 0.0),
+                sla_violations_this_step=info.get("sla_violations", 0.0),
+                host_cpu_utilizations=info.get("cpu_utilizations", []),
+            )
+
+        mk = float(info.get("makespan", 0.0))
+        en = float(info.get("energy", 0.0))
+        co = float(info.get("cost", 0.0))
+        total_reward += ep_reward
+        total_cloudlets += len(cloudlets)
+        makespans.append(mk)
+        energies.append(en)
+        costs.append(co)
+        metrics.log_episode(
+            episode=len(makespans),
+            total_reward=ep_reward,
+            makespan=mk,
+            energy=en,
+            cost=co,
+            epsilon=0.0,
+        )
+
+    wall_clock_s = _time.perf_counter() - wall_start
+
+    sla = (
+        float(env.sim.getSlaViolationCount())
+        if hasattr(env.sim, "getSlaViolationCount")
+        else 0.0
+    )
+    n_eval_eps = len(eval_cloudlets)
+    avg_reward = total_reward / max(n_eval_eps, 1)
+    avg_makespan = sum(makespans) / max(len(makespans), 1)
+    mean_energy = sum(energies) / max(len(energies), 1)
+    mean_cost = sum(costs) / max(len(costs), 1)
+    sla_rate = sla / max(total_cloudlets, 1)
+    dt = np.asarray(decision_times, dtype=np.float64)
+    lat_mean = float(dt.mean()) if dt.size else float("nan")
+    lat_p50 = float(np.percentile(dt, 50)) if dt.size else float("nan")
+    lat_p95 = float(np.percentile(dt, 95)) if dt.size else float("nan")
+
+    weights = reward_manager.get_current_weights()
+    logger.info(
+        "H5 '%s' eval: mean_reward=%.4f | makespan=%.2f | sla_rate=%.4f | "
+        "energy=%.2f | cost=%.4f | decision_lat=%.4f ms",
+        policy_name,
+        avg_reward,
+        avg_makespan,
+        sla_rate,
+        mean_energy,
+        mean_cost,
+        lat_mean,
+    )
+
+    result = HeuristicResult(
+        experiment_id=f"{experiment_id}_{policy_name}",
+        policy=policy_name,
+        n_hosts=n_hosts,
+        eval_episodes=n_eval_eps,
+        eval_mean_reward=avg_reward,
+        eval_makespan=avg_makespan,
+        eval_sla_violations=sla,
+        eval_sla_rate=sla_rate,
+        mean_energy=mean_energy,
+        mean_cost=mean_cost,
+        decision_latency_mean_ms=lat_mean,
+        decision_latency_p50_ms=lat_p50,
+        decision_latency_p95_ms=lat_p95,
+        wall_clock_s=wall_clock_s,
+        seed=seed,
+        extra={
+            "reward_weights": weights,
+            "mi_scale": workload_cfg.get("mi_scale", 1000.0),
+        },
+    )
+    save_heuristic_result(
+        result, checkpoint_dir=str(checkpoint_dir), results_dir=results_dir
+    )
+
+    metrics.close()
+    env.close()
+
+
 def run_training(config: dict) -> None:
+    # H5 dispatch: traditional load-balancing heuristics (no learning).
+    if (config.get("heuristics") or {}).get("enabled"):
+        run_heuristics(config)
+        return
     native_cfg = config.get("native_precision") or {}
     bits_list = native_cfg.get("bits") or []
     precisions = native_cfg.get("precisions") or []  # [{precision, device?}, ...]
@@ -570,10 +757,10 @@ def _run_one_training(config: dict) -> None:
         wall_clock_s=wall_clock_s,
         device=str(agent.device),
         seed=int(config["experiment"]["seed"]),
-        notes=es_reason,
         extra={
             "eval_every": eval_every,
             "n_episodes_budget": n_episodes,
+            "es_reason": es_reason,
         },
     )
     save_run_result(
