@@ -71,6 +71,14 @@ class CloudSimEnv(gym.Env):
             demand_weight=queue_cfg.get("demand_weight", 0.4),
         )
 
+        # Push experiment seed to Java gateway (D3 fix).
+        # Honor Gymnasium reset(seed=...) argument when provided.
+        episode_seed = int(self.config.get("experiment", {}).get("seed", 42))
+        if seed is not None:
+            episode_seed = int(seed)
+        if hasattr(self.sim, "setSeed"):
+            self.sim.setSeed(episode_seed)
+
         if cloudlets:
             self.sim.clearWorkload()
             for spec in cloudlets:

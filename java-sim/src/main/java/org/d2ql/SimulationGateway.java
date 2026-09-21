@@ -23,6 +23,7 @@ import java.io.IOException;
 import java.util.ArrayList;
 import java.util.HashSet;
 import java.util.List;
+import java.util.Random;
 import java.util.Set;
 
 public class SimulationGateway {
@@ -68,6 +69,14 @@ public class SimulationGateway {
     // the energy / cost objectives are real and learnable.
     private static final double HOST_IDLE_WATT = 100.0;
     private static final double HOST_MAX_WATT = 250.0;
+
+    // D3: deterministic seeding of gateway-level randomness.
+    // Note: CloudSimPlus 8.5.7 does NOT expose a seed constructor
+    // (CloudSimPlus() and CloudSimPlus(double) only). Therefore
+    // determinism is enforced via a gateway-level Random and by
+    // pinning the VM-to-host mapping explicitly.
+    private long seed = 42L;
+    private final Random gatewayRandom = new Random(this.seed);
 
     public SimulationGateway() {
         // Workload windows are pushed from Python per episode.
@@ -140,6 +149,19 @@ public class SimulationGateway {
     // Py4J API — called from Python via gateway.entry_point
     // ------------------------------------------------------------------
 
+    public void setSeed(long seed) {
+        this.seed = seed;
+        this.gatewayRandom.setSeed(seed);
+    }
+
+    public long getSeed() {
+        return seed;
+    }
+
+    public Random getGatewayRandom() {
+        return gatewayRandom;
+    }
+
     public double[] reset() {
         if (workloadRecords.isEmpty()) {
             loadWorkload();
@@ -165,6 +187,11 @@ public class SimulationGateway {
     }
 
     private double[] rebuildSimulation() {
+        // Apply seed before any simulation construction.
+        gatewayRandom.setSeed(this.seed);
+
+        // Note: CloudSimPlus 8.5.7 has no seed constructor/config;
+        // determinism relies on this gateway-level seed + explicit mapping.
         simulation  = new CloudSimPlus();
         hosts       = new ArrayList<>();
         cloudlets   = new ArrayList<>();
@@ -189,10 +216,13 @@ public class SimulationGateway {
         datacenter = new DatacenterSimple(simulation, hosts);
         broker     = new DatacenterBrokerSimple(simulation);
 
-        // Build VMs
+        // Build VMs and pin each VM i to host i explicitly (D2 fix).
+        // This removes dependence on broker allocation-policy randomness.
         for (int i = 0; i < NUM_VMS; i++) {
             VmSimple vm = new VmSimple(HOST_MIPS, HOST_PES / 2);
             vm.setRam(HOST_RAM / 4).setBw(HOST_BW / 4).setSize(HOST_STORAGE / 4);
+            // Explicit mapping: VM index i -> host index i.
+            vm.setHost(hosts.get(i));
             vms.add(vm);
         }
         broker.submitVmList(vms);
