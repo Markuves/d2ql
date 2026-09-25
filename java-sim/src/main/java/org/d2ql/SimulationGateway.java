@@ -68,8 +68,13 @@ public class SimulationGateway {
     // CloudSimPlus hosts ship with a PowerModelNull by default (getPower -> 0),
     // which made total energy and cost always zero. We compute power directly so
     // the energy / cost objectives are real and learnable.
-    private static final double HOST_IDLE_WATT = 100.0;
-    private static final double HOST_MAX_WATT = 250.0;
+    // Linear server power model replaced by convex heterogeneous power law (Task 1).
+    private static final double[] HOST_IDLE_WATT = {100.0, 80.0, 120.0, 90.0};
+    private static final double[] HOST_MAX_WATT = {250.0, 200.0, 300.0, 220.0};
+    private static final double[] HOST_GAMMA = {1.8, 1.5, 2.0, 1.6};
+    // Task 3: observation feature reference values
+    private static final long MI_REF = 50_000L;
+    private static final long DEADLINE_REF = 3600L;
 
     // D3: deterministic seeding of gateway-level randomness.
     // Note: CloudSimPlus 8.5.7 does NOT expose a seed constructor
@@ -332,9 +337,10 @@ public class SimulationGateway {
             double util = host.getCpuPercentUtilization();
             if (Double.isNaN(util) || util < 0.0) util = 0.0;
             if (util > 1.0) util = 1.0;
-            // Linear power model: idle 100W, +150W at full load. Independent of the
-            // (null by default) CloudSimPlus power model.
-            double power = HOST_IDLE_WATT + (HOST_MAX_WATT - HOST_IDLE_WATT) * util;
+            // Convex heterogeneous power model: P_i(u) = P_idle_i + (P_max_i - P_idle_i) * u^gamma_i
+            double gamma = HOST_GAMMA[Math.min(i, HOST_GAMMA.length - 1)];
+            double dynamic = Math.pow(util, gamma) * (HOST_MAX_WATT[i] - HOST_IDLE_WATT[i]);
+            double power = HOST_IDLE_WATT[i] + dynamic;
             stepEnergy += power;
             // C3: cost weights each host by its own price per watt, differing by index.
             double price = HOST_PRICE_PER_WATT[Math.min(i, HOST_PRICE_PER_WATT.length - 1)];
@@ -363,14 +369,37 @@ public class SimulationGateway {
     }
 
     private double[] buildObservation() {
-        // obs = [cpu_util x NUM_HOSTS, ram_util x NUM_HOSTS, queue_depth]
-        double[] obs = new double[NUM_HOSTS * 2 + 1];
+        // obs = [cpu_util x NUM_HOSTS, ram_util x NUM_HOSTS, queue_depth,
+        //         mi_norm, num_pes_norm, time_to_deadline_norm] (Task 3, 12 dims total)
+        double[] obs = new double[NUM_HOSTS * 2 + 1 + 3];
         for (int i = 0; i < hosts.size() && i < NUM_HOSTS; i++) {
             obs[i]            = hosts.get(i).getCpuPercentUtilization();
             obs[NUM_HOSTS + i] = hosts.get(i).getRam().getPercentUtilization();
         }
         int pending = Math.max(0, workloadRecords.size() - currentCloudletIndex);
         obs[NUM_HOSTS * 2] = Math.min(1.0, pending / (double) Math.max(workloadRecords.size(), 1));
+
+        // Incoming cloudlet features for the next step (Task 3)
+        if (currentCloudletIndex < workloadRecords.size()) {
+            long[] rec = workloadRecords.get(currentCloudletIndex);
+            long mi = rec[2];
+            int numPes = (int) Math.min(Math.max(rec[3], 1), HOST_PES / 2);
+            long deadline = rec[1];
+            double simTime = (simulation != null) ? simulation.clock() : 0.0;
+
+            double miNorm = Math.min(1.0, Math.log1p(mi) / Math.log1p(MI_REF));
+            double pesNorm = Math.min(1.0, (double) numPes / (HOST_PES / 2.0));
+            double timeToDeadline = Math.max(0.0, (deadline - simTime) / DEADLINE_REF);
+            double timeNorm = Math.min(1.0, timeToDeadline);
+
+            obs[NUM_HOSTS * 2 + 1] = miNorm;
+            obs[NUM_HOSTS * 2 + 2] = pesNorm;
+            obs[NUM_HOSTS * 2 + 3] = timeNorm;
+        } else {
+            obs[NUM_HOSTS * 2 + 1] = 0.0;
+            obs[NUM_HOSTS * 2 + 2] = 0.0;
+            obs[NUM_HOSTS * 2 + 3] = 0.0;
+        }
         return obs;
     }
 

@@ -303,8 +303,8 @@ def main() -> None:
     parser.add_argument(
         "--state-dim",
         type=int,
-        default=9,
-        help="Observation space dimension (NUM_HOSTS * 2 + 1)",
+        default=12,
+        help="Observation space dimension (NUM_HOSTS * 2 + 1 + 3 cloudlet features = 12 for 4 hosts)",
     )
     parser.add_argument(
         "--action-dim",

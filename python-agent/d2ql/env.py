@@ -19,8 +19,8 @@ class CloudSimEnv(gym.Env):
         # Action: assign the pending cloudlet to one of n_cloud_hosts
         self.action_space = spaces.Discrete(n_hosts)
 
-        # Observation: cpu_util per host + ram_util per host + queue depth
-        obs_dim = n_hosts * 2 + 1
+        # Observation: cpu_util x 4 + ram_util x 4 + queue_depth + 3 cloudlet features = 12 dims (Task 3)
+        obs_dim = n_hosts * 2 + 1 + 3
         self.observation_space = spaces.Box(
             low=0.0,
             high=1.0,

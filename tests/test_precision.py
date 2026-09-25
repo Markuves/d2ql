@@ -19,14 +19,14 @@ from d2ql.precision import (
 # ---------------------------------------------------------------------------
 
 def test_model_macs_shape():
-    # state(9) -> hidden(256); hidden -> hidden(256); hidden -> action(4)
-    macs = model_macs(9, 256, 2, 4)
-    expected = 9 * 256 + 256 * 256 + 256 * 4
+    # state(12) -> hidden(256); hidden -> hidden(256); hidden -> action(4) (Task 3)
+    macs = model_macs(12, 256, 2, 4)
+    expected = 12 * 256 + 256 * 256 + 256 * 4
     assert macs == expected
 
 
 def test_model_flops_is_twice_macs():
-    assert model_flops(9, 256, 2, 4) == 2.0 * model_macs(9, 256, 2, 4)
+    assert model_flops(12, 256, 2, 4) == 2.0 * model_macs(12, 256, 2, 4)
 
 
 def test_effective_capacity_bits():
@@ -93,7 +93,7 @@ def test_binary_matmul_matches_sign_matmul():
     from d2ql.kernels import binary_network_forward, pack_binary_bits, word_masks
 
     torch.manual_seed(0)
-    s, h, a = 9, 64, 4
+    s, h, a = 12, 64, 4
     w1 = (torch.randn(h, s) - 0.5) * 2
     b1 = torch.randn(h) * 0.1
     w2 = (torch.randn(a, h) - 0.5) * 2

@@ -31,7 +31,7 @@ def _relu(x):
     return torch.relu(x)
 
 
-def make_weights(device, state_dim=9, hidden=256, action=4, seed=0):
+def make_weights(device, state_dim=12, hidden=256, action=4, seed=0):
     torch.manual_seed(seed)
     w1 = (torch.randn(hidden, state_dim, device=device) - 0.5) * 2
     b1 = torch.randn(hidden, device=device) * 0.1
@@ -42,7 +42,7 @@ def make_weights(device, state_dim=9, hidden=256, action=4, seed=0):
     return [(w1, b1), (w2, b2), (w3, b3)]
 
 
-def layers_fp32(device, state_dim=9, hidden=256, action=4, seed=0):
+def layers_fp32(device, state_dim=12, hidden=256, action=4, seed=0):
     torch.manual_seed(seed)
     net = nn.Sequential(
         nn.Linear(state_dim, hidden),
@@ -79,7 +79,7 @@ def timeit(fn, warmup=5, runs=100):
     return ts[len(ts) // 2]
 
 
-def benchmark(device, batches, iters, state_dim=9, hidden=256, action=4):
+def benchmark(device, batches, iters, state_dim=12, hidden=256, action=4):
     layers = make_weights(device, state_dim, hidden, action)
     net = layers_fp32(device, state_dim, hidden, action)
 
