@@ -229,11 +229,18 @@ class DDQNAgent:
         self.hidden_size = int(config["agent"].get("hidden_size", 256))
         self.n_hidden_layers = int(config["agent"].get("n_hidden_layers", 2))
 
-        # fp16 runs use AMP (autocast fp16 + GradScaler) over fp32 master weights
-        # — native fp16 params are incompatible with GradScaler, which needs fp32
-        # master grads. Grid precisions (int8/4/ternary) and fp32 compute in fp32,
-        # so no underflow; the scaler is a harmless no-op there.
-        self.use_amp = (self.precision_name == "16" and self.device.type == "cuda")
+        # Half-precision runs use AMP autocast over fp32 master weights: native
+        # low-precision params are incompatible with GradScaler, which needs fp32
+        # master grads. fp16 needs loss scaling (narrow exponent range); bf16 has
+        # the fp32 exponent range, so it runs autocast-only with no scaler.
+        # Grid precisions (ternary/4/8) and fp32 compute in fp32.
+        self.amp_dtype = None
+        if self.device.type == "cuda":
+            if self.precision_name == "16":
+                self.amp_dtype = torch.float16
+            elif self.precision_name == "bf16":
+                self.amp_dtype = torch.bfloat16
+        self.use_amp = self.amp_dtype is not None
         self.param_dtype = torch.float32 if self.use_amp else compute_dtype(self.precision_name)
 
         # Networks live at the configured bit-width from initialization (H4).
@@ -266,9 +273,12 @@ class DDQNAgent:
         )
 
         self.optimizer = optim.Adam(self.online_net.parameters(), lr=config["agent"]["learning_rate"])
-        # AMP GradScaler: avoids fp16 gradient underflow/overflow (fp16 runs).
-        # On fp32 / grid (int8/4/ternary) compute it is a harmless no-op.
-        self.scaler = torch.amp.GradScaler("cuda") if self.device.type == "cuda" else None
+        # AMP GradScaler: avoids fp16 gradient underflow/overflow (fp16 runs only).
+        # bf16 keeps the fp32 exponent range so it needs no scaling; fp32/grid are
+        # no-ops there, so the scaler stays None for every non-fp16 run.
+        self.scaler = (
+            torch.amp.GradScaler("cuda") if self.amp_dtype == torch.float16 else None
+        )
         self.memory = PrioritizedReplayBuffer(
             config["agent"]["replay_buffer_capacity"], 
             alpha=config["agent"]["per_alpha"] # default 0.6
@@ -418,6 +428,40 @@ class DDQNAgent:
             "n_batches": n_batches,
         }
 
+    def benchmark_throughput_sweep(
+        self,
+        state_dim: int,
+        batch_sizes: list[int],
+        n_batches: int = 200,
+        warmup: int = 20,
+    ) -> dict[str, dict]:
+        """Batched deploy throughput across several batch sizes (P1).
+
+        Single-sample latency is launch-bound and hides any kernel advantage, so
+        the honest comparison needs the throughput-vs-batch curve: it is the only
+        regime where a low-bit kernel can overtake fp32. Returns a JSON-friendly
+        mapping ``{"<batch>": {samples_per_sec, ms_per_batch}}`` so the whole
+        curve survives in the results CSV.
+        """
+        sweep: dict[str, dict] = {}
+        for bs in batch_sizes:
+            bs = int(bs)
+            res = self.benchmark_throughput(
+                state_dim,
+                batch_size=bs,
+                n_batches=n_batches,
+                warmup=warmup,
+            )
+            sweep[str(bs)] = {
+                "samples_per_sec": res["samples_per_sec"],
+                "ms_per_batch": res["ms_per_batch"],
+            }
+            logger.info(
+                "Throughput sweep (precision=%s, device=%s): batch=%d -> %.0f samples/s",
+                self.precision_name, self.device.type, bs, res["samples_per_sec"],
+            )
+        return sweep
+
     def select_action(self, state: np.ndarray, evaluate: bool = False) -> int:
         """Epsilon-greedy action selection."""
         if not evaluate and random.random() < self.epsilon:
@@ -433,9 +477,9 @@ class DDQNAgent:
         self.target_net.load_state_dict(self.online_net.state_dict())
 
     def _cast_fwd(self, net: nn.Module, x: torch.Tensor) -> torch.Tensor:
-        """Run a forward pass, enabling fp16 autocast for AMP (16-bit) runs."""
+        """Run a forward pass, using AMP autocast for fp16 / bf16 runs."""
         if self.use_amp:
-            with torch.autocast("cuda", dtype=torch.float16):
+            with torch.autocast("cuda", dtype=self.amp_dtype):
                 return net(x)
         return net(x)
 

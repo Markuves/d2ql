@@ -119,3 +119,39 @@ def test_binary_matmul_matches_sign_matmul():
         rtol=0.0,
         atol=1e-3,
     )
+
+
+# ---------------------------------------------------------------------------
+# P3: ternary bit-packed CPU kernel (two binary passes)
+# ---------------------------------------------------------------------------
+
+def test_ternary_bitpacked_matmul_matches_sign_reference():
+    # The ternary kernel must equal sign(x) @ w^T for ternary weights: sign
+    # binarizes the activations and the two binary passes recover the ternary
+    # weight exactly. K=40 is not a multiple of 32 on purpose (word padding).
+    from d2ql.kernels import ternary_matmul_batched
+    from d2ql.precision import quantize_to_grid
+
+    torch.manual_seed(3)
+    batch, in_f, out_f = 6, 40, 7
+    x = torch.randn(batch, in_f)
+    w = quantize_to_grid(torch.randn(out_f, in_f), "ternary", channel_dim=0)
+    bias = torch.randn(out_f) * 0.1
+
+    y = torch.as_tensor(ternary_matmul_batched(x, w, bias), dtype=torch.float32)
+    sign_x = torch.where(x > 0, torch.ones_like(x), -torch.ones_like(x))
+    ref = sign_x @ w.t() + bias
+    torch.testing.assert_close(y, ref, rtol=1e-5, atol=1e-4)
+
+
+def test_native_bit_linear_ternary_cpu_deploy_uses_packed_kernel():
+    # On CPU, a ternary layer in deploy mode must route through the bit-packed
+    # kernel (not the int8 emulation path).
+    layer = NativeBitLinear(40, 7, precision="ternary", quantize_activations=True)
+    x = torch.randn(6, 40)
+    layer.deploy = True
+    out = layer(x)
+    sign_x = torch.where(x > 0, torch.ones_like(x), -torch.ones_like(x))
+    ref = sign_x @ layer.weight.t() + layer.bias
+    assert out.shape == ref.shape
+    torch.testing.assert_close(out, ref, rtol=1e-5, atol=1e-4)

@@ -60,13 +60,32 @@ class AzureTraceLoader:
         self,
         trace_path: str = "data/workload.csv.gz",
         episode_length: int = 50,
-        mi_scale: float = 1000.0,
+        mi_scale: Optional[float] = None,
         seed: Optional[int] = None,
         holdout_frac: float = 0.0,
+        simulation_time_scale: Optional[float] = None,
     ) -> None:
         self.trace_path = Path(trace_path)
         self.episode_length = episode_length
-        self.mi_scale = mi_scale
+        # Canonical knob for how long a cloudlet occupies the simulated machine:
+        # exec_time ~ mi / mips, so scaling the estimated instruction count scales
+        # simulated time one-to-one. `mi_scale` is the legacy name for exactly the
+        # same quantity and is only honored when `simulation_time_scale` is absent,
+        # so an H4 config that sets both can never double-scale by accident.
+        # 1000.0 preserves the historical default when neither key is present.
+        if simulation_time_scale is not None:
+            if mi_scale is not None and abs(float(mi_scale) - float(simulation_time_scale)) > 1e-12:
+                logger.warning(
+                    "Both mi_scale=%.6g and simulation_time_scale=%.6g are set; "
+                    "using simulation_time_scale.",
+                    float(mi_scale), float(simulation_time_scale),
+                )
+            effective_scale = float(simulation_time_scale)
+        else:
+            effective_scale = float(mi_scale) if mi_scale is not None else 1000.0
+        self.sim_time_scale = effective_scale
+        # Kept as an alias: it is the effective MI multiplier used below.
+        self.mi_scale = effective_scale
         self.holdout_frac = holdout_frac
         self.rng = random.Random(seed)
         np.random.seed(seed)

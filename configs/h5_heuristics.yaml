@@ -18,9 +18,10 @@ py4j:
   host: "java-sim"
   port: 25333
 
-# Must match the H4 workload settings (episode_length, holdout_frac, mi_scale,
+# Must match the H4 workload settings (episode_length, holdout_frac, time scale,
 # seed) so the heuristics and the agent are evaluated on the identical held-out
-# windows.
+# windows. H4 sets `simulation_time_scale: 0.1`; here the legacy `mi_scale` name
+# carries the same value (it is the alias for the same quantity).
 workload:
   trace_path: "data/workload.csv.gz"
   episode_length: 50

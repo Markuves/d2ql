@@ -2,6 +2,10 @@ experiment:
   id: "h4_native_precision"
   hypothesis: "H4"
   seed: 42
+  # P2: each (precision, device, hidden) configuration is replicated once per
+  # seed. A single seed with 10 eval episodes cannot separate a real effect from
+  # run-to-run noise, so every cell is repeated here.
+  seeds: [42, 43, 44]
   description: >
     Native bit-width training from initialization, with a shared capacity
     sweep. Every precision starts at the same hidden width; larger widths
@@ -10,8 +14,10 @@ experiment:
     extra neurons can match higher-precision quality at lower latency.
 
     This is not H2 post-training quantization and not quantization-aware
-    training. INT4/INT8 live on a signed integer grid; ternary uses BitNet-style
-    weights in {-1, 0, +1}. 16/32 use native floating-point dtypes (no AMP).
+    training. Ternary uses BitNet-style weights in {-1, 0, +1}; 32 uses the
+    native float32 dtype. fp16 and bf16 run under AMP autocast over fp32 master
+    weights (see agent.py): fp16 with a GradScaler, bf16 without one because its
+    exponent range already matches fp32.
 
 datacenter:
   n_cloud_hosts: 4
@@ -28,10 +34,7 @@ workload:
   # C1 fix: hold out the trailing fraction of episode windows for a clean,
   # unseen-workload evaluation after training.
   holdout_frac: 0.2
-  # Rescale cloudlet MI so each cloudlet finishes in <0.1s of simulated time
-  # (instead of ~2.6 days), making every episode terminate in seconds. Tuned to
-  # keep episodes fast even for long-tail cloudlets.
-  mi_scale: 0.1
+  simulation_time_scale: 0.05
 
 # C1 fix: deterministic, epsilon-free held-out evaluation (business metrics).
 evaluation:
@@ -42,9 +45,9 @@ queue:
   demand_weight: 0.4
 
 agent:
-  precision: "32"          # overridden per run from native_precision.bits
+  precision: "32"          # overridden per run from native_precision.precisions
   hidden_size: 256         # overridden per run from native_precision.capacity
-  n_hidden_layers: 2
+  n_hidden_layers: 2       # H4 overrides this from native_precision.capacity.n_hidden_layers
   learning_rate: 0.0005
   gamma: 0.98
   target_update_freq: 750
@@ -60,12 +63,12 @@ agent:
   per_beta_end: 1.0
 
 training:
-  n_episodes: 600
+  n_episodes: 400
   eval_every_n_episodes: 50
   checkpoint_dir: "outputs/checkpoints/h4"
   tensorboard_dir: "outputs/tensorboard"
 
-# Stop each (precision, hidden_size) run as soon as its evaluation reward
+# Stop each (precision, hidden_size, seed) run as soon as its evaluation reward
 # plateaus, instead of always running the full n_episodes budget. The metric
 # is the mean reward over a trailing window of `window_size` evaluations;
 # after `patience` consecutive evaluations without a new best window we halt.
@@ -83,7 +86,12 @@ latency:
   benchmark: true
   n_samples: 200
   warmup: 20
-  # Batched deploy throughput (samples/sec) — the regime where low-bit kernels pay off.
+  # P1: single-sample latency is launch-bound, so the throughput-vs-batch curve is
+  # what actually exposes a kernel advantage. Every batch listed here is measured
+  # and stored per run in the results CSV column `throughput_by_batch`.
+  throughput_batch_sizes: [1, 8, 32, 128]
+  # Primary batch kept in the scalar `throughput_pps` / `throughput_batch_size`
+  # columns for backward compatibility.
   throughput_batch_size: 64
   throughput_n_batches: 200
 
@@ -100,28 +108,25 @@ reward:
   # E_step_max = sum([250, 200, 300, 220]) * 1.0s / 3600 = ~0.2694 wh
   e_step_max_wh: 0.2694
 
-# Low-precision native training (not post-quantization). Four deployment-typed
-# precisions: fp32 & fp16 train/infer on CUDA; fp32 & int8 on CPU. Each gets the
-# full capacity sweep; every run reports training latency, inference latency and
-# held-out reward. int4/ternary are retired from the sweep.
 native_precision:
   enabled: true
   quantize_activations: true
   precisions:
-    - {precision: 32, device: cuda, label: fp32-gpu}
-    - {precision: 16, device: cuda, label: fp16-gpu}
-    - {precision: 32, device: cpu,  label: fp32-cpu}
-    - {precision: 8,  device: cpu,  label: int8-cpu}
+    - {precision: 32,      device: cuda, label: fp32-gpu}
+    - {precision: 16,      device: cuda, label: fp16-gpu}
+    - {precision: bf16,    device: cuda, label: bf16-gpu}
+    - {precision: 32,      device: cpu,  label: fp32-cpu}
+    - {precision: ternary, device: cpu,  label: ternary-cpu}
   learning_rate_overrides:
-    8: 0.0002
+    ternary: 0.0003
     16: 0.0003
     32: 0.0005
-  # Capacity exploration per precision. Higher hidden sizes are dropped only for
-  # precisions that would be impractically slow on their deployment device.
   capacity:
-    hidden_sizes: [256, 512, 1024, 2048, 4096]
-    n_hidden_layers: 2
+    hidden_sizes: [64, 128, 256, 512, 1024, 2048, 4096]
+    # Vector de profundidades: H4 barre cada valor (por ahora 1 y 2). El total de
+    # corridas se multiplica por len(n_hidden_layers).
+    n_hidden_layers: [1, 2]
     max_hidden_size:
-      32: 2048    # fp32 on CPU becomes too slow beyond 2048
-      16: 4096
-      8: 4096
+      32: 2048           # fp32 on CPU becomes too slow beyond 2048
+      16: 4096           # applies to fp16 and bf16 (both 16-bit)
+      ternary: 4096

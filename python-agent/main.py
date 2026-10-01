@@ -218,7 +218,8 @@ def _run_one_heuristic(config: dict, policy_name: str) -> None:
         episode_length=workload_cfg.get("episode_length", 50),
         seed=seed,
         holdout_frac=float(workload_cfg.get("holdout_frac", 0.0)),
-        mi_scale=float(workload_cfg.get("mi_scale", 1000.0)),
+        mi_scale=workload_cfg.get("mi_scale"),
+        simulation_time_scale=workload_cfg.get("simulation_time_scale"),
     )
     logger.info(
         "H5 heuristic '%s' | workload summary: %s", policy_name, trace_loader.summary()
@@ -328,7 +329,8 @@ def _run_one_heuristic(config: dict, policy_name: str) -> None:
         seed=seed,
         extra={
             "reward_weights": weights,
-            "mi_scale": workload_cfg.get("mi_scale", 1000.0),
+            "mi_scale": trace_loader.sim_time_scale,
+            "simulation_time_scale": trace_loader.sim_time_scale,
         },
     )
     save_heuristic_result(
@@ -339,16 +341,83 @@ def _run_one_heuristic(config: dict, policy_name: str) -> None:
     env.close()
 
 
+def _experiment_seeds(config: dict) -> list[int]:
+    """Seeds each run is replicated with (P2).
+
+    Reads ``experiment.seeds`` (a list) when present, else falls back to the
+    single ``experiment.seed``. Replicates are what make reward differences
+    readable against run-to-run noise: with one seed and 10 eval episodes the
+    spread inside a single precision (~sigma 3) is the same size as the effect
+    being measured, so no "optimum" can be claimed from a single seed.
+    """
+    exp = config.get("experiment", {}) or {}
+    seeds = exp.get("seeds")
+    if not seeds:
+        seeds = [exp.get("seed", 42)]
+    return [int(s) for s in seeds]
+
+
+def _resolve_layer_counts(capacity_cfg: dict, agent_cfg: dict) -> list[int]:
+    """Depth values swept by H4: ``n_hidden_layers`` may be an int or a vector.
+
+    Returns the sorted, de-duplicated set of valid depths (>= 1), so a config can
+    ask for ``[1, 2]`` and every depth is enumerated by the plan.
+    """
+    raw = capacity_cfg.get("n_hidden_layers", agent_cfg.get("n_hidden_layers", 2))
+    values = raw if isinstance(raw, (list, tuple)) else [raw]
+    counts = sorted({int(v) for v in values if int(v) >= 1})
+    if not counts:
+        raise ValueError(
+            "native_precision.capacity.n_hidden_layers must contain a value >= 1"
+        )
+    return counts
+
+
+def _build_native_plan(
+    precisions: list,
+    bits_list: list,
+    hidden_sizes: list[int],
+    layer_counts: list[int],
+    max_hidden: dict,
+) -> list[tuple[str, str, int, int]]:
+    """Expand the native sweep into (precision, device, hidden, n_layers) tuples.
+
+    Device defaults to "auto" (CUDA if available); fp32 may appear on both GPU and
+    CPU as distinct runs. Widths above ``max_hidden_size`` for a precision are
+    dropped, and every (width, depth) combination is enumerated.
+    """
+    from d2ql.precision import lookup_max_hidden, parse_precision
+
+    if precisions:
+        specs = [
+            (parse_precision(s["precision"]), str(s.get("device", "auto")).strip().lower())
+            for s in precisions
+        ]
+    else:
+        specs = [(parse_precision(raw), "auto") for raw in bits_list]
+
+    plan: list[tuple[str, str, int, int]] = []
+    for name, device in specs:
+        cap = lookup_max_hidden(max_hidden, name)
+        for hidden in hidden_sizes:
+            if cap is not None and hidden > cap:
+                continue
+            for layers in layer_counts:
+                plan.append((name, device, hidden, layers))
+    return plan
+
+
 def run_training(config: dict) -> None:
     # H5 dispatch: traditional load-balancing heuristics (no learning).
     if (config.get("heuristics") or {}).get("enabled"):
         run_heuristics(config)
         return
+    seeds = _experiment_seeds(config)
     native_cfg = config.get("native_precision") or {}
     bits_list = native_cfg.get("bits") or []
     precisions = native_cfg.get("precisions") or []  # [{precision, device?}, ...]
     if native_cfg.get("enabled") and (bits_list or precisions):
-        from d2ql.precision import parse_precision, precision_bits, lookup_max_hidden
+        from d2ql.precision import precision_bits
 
         lr_overrides = native_cfg.get("learning_rate_overrides") or {}
         capacity_cfg = native_cfg.get("capacity") or {}
@@ -356,63 +425,67 @@ def run_training(config: dict) -> None:
             config["agent"].get("hidden_size", 256)
         ]
         hidden_sizes = [int(h) for h in hidden_sizes]
-        n_hidden_layers = int(
-            capacity_cfg.get("n_hidden_layers", config["agent"].get("n_hidden_layers", 2))
-        )
+        # H4 also sweeps depth: `n_hidden_layers` may be an int or a vector.
+        layer_counts = _resolve_layer_counts(capacity_cfg, config.get("agent", {}))
         max_hidden = capacity_cfg.get("max_hidden_size") or {}
 
-        # Plan: list of (precision, device, hidden). Device defaults to "auto"
-        # (CUDA if available). FP32 can appear on both GPU and CPU as distinct runs.
-        if precisions:
-            plan: list[tuple[str, str, int]] = []
-            for spec in precisions:
-                name = parse_precision(spec["precision"])
-                device = str(spec.get("device", "auto")).strip().lower()
-                cap = lookup_max_hidden(max_hidden, name)
-                for hidden in hidden_sizes:
-                    if cap is not None and hidden > cap:
-                        continue
-                    plan.append((name, device, hidden))
-        else:
-            plan = []
-            for raw in bits_list:
-                nm = parse_precision(raw)
-                cap = lookup_max_hidden(max_hidden, nm)
-                for h in hidden_sizes:
-                    if cap is not None and h > cap:
-                        continue
-                    plan.append((nm, "auto", h))
+        plan = _build_native_plan(
+            precisions, bits_list, hidden_sizes, layer_counts, max_hidden
+        )
+        logger.info(
+            "H4 plan: %d combinaciones (precisión, device, ancho, profundidad): "
+            "%d precisiones × %d anchos × %d profundidades.",
+            len(plan),
+            len(precisions) or len(bits_list),
+            len(hidden_sizes),
+            len(layer_counts),
+        )
 
-        for name, device, hidden_size in plan:
-            bits = precision_bits(name)
-            run_config = deepcopy(config)
-            run_config["agent"]["precision"] = name
-            run_config["agent"]["hidden_size"] = hidden_size
-            run_config["agent"]["n_hidden_layers"] = n_hidden_layers
-            run_config["agent"]["device"] = device
-            if name in lr_overrides:
-                run_config["agent"]["learning_rate"] = lr_overrides[name]
-            elif bits in lr_overrides:
-                run_config["agent"]["learning_rate"] = lr_overrides[bits]
-            elif str(bits) in lr_overrides:
-                run_config["agent"]["learning_rate"] = lr_overrides[str(bits)]
-            # Tag includes device so fp32-gpu and fp32-cpu are distinct runs.
-            tag = f"{name}_{device}_h{hidden_size}"
-            base_ckpt = Path(config["training"]["checkpoint_dir"])
-            run_config["training"]["checkpoint_dir"] = str(base_ckpt / tag)
-            experiment_id = config.get("experiment", {}).get("id", "run")
-            run_config.setdefault("experiment", {})["id"] = f"{experiment_id}_{tag}"
-            logger.info(
-                "H4 run: %s (%.2f-bit, device=%s) | hidden %d x %d",
-                name,
-                bits,
-                device,
-                n_hidden_layers,
-                hidden_size,
-            )
-            _run_one_training(run_config)
+        for seed in seeds:
+            for name, device, hidden_size, n_layers in plan:
+                bits = precision_bits(name)
+                run_config = deepcopy(config)
+                run_config["agent"]["precision"] = name
+                run_config["agent"]["hidden_size"] = hidden_size
+                run_config["agent"]["n_hidden_layers"] = n_layers
+                run_config["agent"]["device"] = device
+                # P2: one replicate per seed. The seed is pushed into the agent,
+                # the trace loader and the Java gateway (env.reset -> setSeed).
+                run_config.setdefault("experiment", {})["seed"] = seed
+                if name in lr_overrides:
+                    run_config["agent"]["learning_rate"] = lr_overrides[name]
+                elif bits in lr_overrides:
+                    run_config["agent"]["learning_rate"] = lr_overrides[bits]
+                elif str(bits) in lr_overrides:
+                    run_config["agent"]["learning_rate"] = lr_overrides[str(bits)]
+                # Tag includes device, depth and seed so every run is distinct.
+                tag = f"{name}_{device}_h{hidden_size}_l{n_layers}_s{seed}"
+                base_ckpt = Path(config["training"]["checkpoint_dir"])
+                run_config["training"]["checkpoint_dir"] = str(base_ckpt / tag)
+                experiment_id = config.get("experiment", {}).get("id", "run")
+                run_config["experiment"]["id"] = f"{experiment_id}_{tag}"
+                logger.info(
+                    "H4 run: %s (%.2f-bit, device=%s) | hidden %d x %d capas | seed %d",
+                    name,
+                    bits,
+                    device,
+                    hidden_size,
+                    n_layers,
+                    seed,
+                )
+                _run_one_training(run_config)
         return
-    _run_one_training(config)
+
+    # Non-native single-plan path: still replicate the run across seeds (P2).
+    for seed in seeds:
+        run_config = deepcopy(config)
+        run_config.setdefault("experiment", {})["seed"] = seed
+        if len(seeds) > 1:
+            base_ckpt = Path(config["training"]["checkpoint_dir"])
+            run_config["training"]["checkpoint_dir"] = str(base_ckpt / f"seed_{seed}")
+            experiment_id = config.get("experiment", {}).get("id", "run")
+            run_config["experiment"]["id"] = f"{experiment_id}_s{seed}"
+        _run_one_training(run_config)
 
 
 def _run_one_training(config: dict) -> None:
@@ -451,6 +524,12 @@ def _run_one_training(config: dict) -> None:
     latency_warmup = int(latency_cfg.get("warmup", 20))
     throughput_batch = int(latency_cfg.get("throughput_batch_size", 64))
     throughput_n_batches = int(latency_cfg.get("throughput_n_batches", 200))
+    # P1: batch sizes swept for the throughput-vs-batch curve. Falls back to the
+    # single primary batch so old configs keep working.
+    throughput_batch_sizes = latency_cfg.get("throughput_batch_sizes")
+    if not throughput_batch_sizes:
+        throughput_batch_sizes = [throughput_batch]
+    throughput_batch_sizes = [int(b) for b in throughput_batch_sizes]
 
     experiment_id = config.get("experiment", {}).get("id", "run")
     run_stamp = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
@@ -470,7 +549,8 @@ def _run_one_training(config: dict) -> None:
         episode_length=workload_cfg.get("episode_length", 50),
         seed=config["experiment"]["seed"],
         holdout_frac=float(workload_cfg.get("holdout_frac", 0.0)),
-        mi_scale=float(workload_cfg.get("mi_scale", 1000.0)),
+        mi_scale=workload_cfg.get("mi_scale"),
+        simulation_time_scale=workload_cfg.get("simulation_time_scale"),
     )
     logger.info("Workload summary: %s", trace_loader.summary())
 
@@ -697,15 +777,29 @@ def _run_one_training(config: dict) -> None:
             warmup=latency_warmup,
         )
 
-    # Throughput-per-batch (the regime where low-bit kernels pay off). Runs the
-    # real deploy kernel on a batched forward and reports samples/sec.
+    # Throughput-per-batch (the regime where low-bit kernels pay off). P1: sweep
+    # several batch sizes so the throughput-vs-batch curve is reported, not just
+    # a single point; `throughput_batch_size` stays the "primary" batch.
     throughput = {"samples_per_sec": float("nan"), "batch_size": throughput_batch, "n_batches": throughput_n_batches}
+    throughput_by_batch: dict = {}
     if latency_enabled:
-        throughput = agent.benchmark_throughput(
+        throughput_by_batch = agent.benchmark_throughput_sweep(
             state_dim=env.observation_space.shape[0],
-            batch_size=throughput_batch,
+            batch_sizes=throughput_batch_sizes,
             n_batches=throughput_n_batches,
+            warmup=latency_warmup,
         )
+        primary = throughput_by_batch.get(str(throughput_batch))
+        if primary is None and throughput_by_batch:
+            # Fall back to the largest measured batch for the scalar column.
+            throughput_batch = max(int(b) for b in throughput_by_batch)
+            primary = throughput_by_batch[str(throughput_batch)]
+        if primary is not None:
+            throughput = {
+                "samples_per_sec": primary["samples_per_sec"],
+                "batch_size": throughput_batch,
+                "n_batches": throughput_n_batches,
+            }
 
     wall_clock_s = _time.perf_counter() - wall_start
 
@@ -743,6 +837,7 @@ def _run_one_training(config: dict) -> None:
         latency_n_samples=latency["n_samples"],
         throughput_pps=throughput["samples_per_sec"],
         throughput_batch_size=throughput["batch_size"],
+        throughput_by_batch=throughput_by_batch,
         params=params,
         packed_size_mb=packed_size_mb(params, precision_name),
         flops=agent.flops(),
@@ -761,6 +856,7 @@ def _run_one_training(config: dict) -> None:
             "eval_every": eval_every,
             "n_episodes_budget": n_episodes,
             "es_reason": es_reason,
+            "simulation_time_scale": trace_loader.sim_time_scale,
         },
     )
     save_run_result(

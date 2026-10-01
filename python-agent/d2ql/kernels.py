@@ -142,6 +142,13 @@ def lowbit_matmul_triton(
 # ---------------------------------------------------------------------------
 # CPU 1-bit / ternary bit-packed kernels (B1, deployment target = CPU)
 #
+# P3 decision: int8 is retired from the CPU sweep and replaced by ternary. An
+# int8 x int8 CPU GEMM has no fast path on this host (Zen 3 has no VNNI), so it
+# can only be emulated (int32) and is always slower than fp32. Ternary, by
+# contrast, has a genuine bit-packed kernel: a ternary weight matrix splits into
+# two binary matrices (w_pos, w_neg) and each pass reduces to XOR + popcount on
+# the integer ALU (see `ternary_matmul_batched`).
+#
 # These are the classic Binary/Ternary Neural Network kernels: instead of
 # floating-point multiply-accumulate, we pack 32 weight/activation signs into
 # one uint32 word and reduce the inner product with XOR + popcount. Pure
@@ -221,3 +228,80 @@ def binary_network_forward(x, layer_weights: list) -> _np.ndarray:
         if i < len(layer_weights) - 1:
             act = _np.where(out > 0, 1.0, -1.0)             # hard binarize hidden layers
     return out  # final layer returns raw dots (pre-argmax)
+
+
+# ---------------------------------------------------------------------------
+# Ternary bit-packed kernel (P3): weights in {-s, 0, +s} via TWO binary passes
+#
+# A ternary weight matrix is decomposed as w = s * (w_pos - w_neg), where
+# w_pos = 1{w > 0} and w_neg = 1{w < 0} are binary and s is the per-output-
+# channel scale. With activations hard-binarized to ±1 (standard for bit-packed
+# BNN kernels), the exact identity
+#
+#     dot(x, w_pos) - dot(x, w_neg) = 2 * dot(x, w)
+#
+# (because each ±1 encoding double-counts) means the ternary matmul costs only
+# two XOR+popcount passes plus a shift. No float or integer multiply is needed,
+# which is exactly the regime where a CPU without VNNI can beat fp32.
+# ---------------------------------------------------------------------------
+
+
+def ternary_matmul_batched(
+    x: "torch.Tensor | _np.ndarray",
+    weight: "torch.Tensor | _np.ndarray",
+    bias: "torch.Tensor | _np.ndarray | None" = None,
+) -> _np.ndarray:
+    """y[M, N] = (x_binarized @ w^T) * channel_scale + bias, via 2 binary passes.
+
+    ``x``: fp [M, K] (binarized internally by sign), ``weight``: fp [N, K] holding
+    ternary values ``{-s, 0, +s}`` per output channel, ``bias``: [N] or None.
+    Returns fp64 [M, N] — the caller casts to fp32.
+
+    Activations are hard-binarized to ±1 (sign), matching the classic
+    BNN/ternary bit-packed formulation, so this is a *deployment* approximation
+    of the 8-bit-activation STE training path — not a bit-exact equivalent.
+    """
+    act = x.detach().cpu().numpy() if isinstance(x, torch.Tensor) else x
+    w_np = weight.detach().cpu().numpy() if isinstance(weight, torch.Tensor) else weight
+    act = _np.asarray(act, dtype=_np.float64)
+    w_np = _np.asarray(w_np, dtype=_np.float64)
+
+    if act.ndim == 1:
+        act = act[None, :]
+    if act.ndim > 2:
+        act = act.reshape(-1, act.shape[-1])
+
+    K = w_np.shape[1]
+    masks = word_masks(K)
+
+    # Per-output-channel scale, taken from the largest-magnitude ternary value.
+    scale = _np.abs(w_np).max(axis=1)
+    scale = _np.where(scale > 0.0, scale, 1.0)
+
+    # Binary planes of the ternary weights: w = s * (w_pos - w_neg).
+    w_pos_words = pack_binary_bits((w_np > 0.0).astype(_np.float64))
+    w_neg_words = pack_binary_bits((w_np < 0.0).astype(_np.float64))
+
+    # Chunk over rows: binary_matmul_batched materializes an [M, N, W] temporary,
+    # so batch x width x words can reach gigabytes for large hidden sizes. Cap
+    # the intermediate to ~2e7 elements (~160 MB) regardless of the batch.
+    n_out = w_np.shape[0]
+    words = w_pos_words.shape[1]
+    max_elems = 2.0e7
+    chunk = max(1, int(max_elems / max(n_out * words, 1)))
+
+    y = _np.empty((act.shape[0], n_out), dtype=_np.float64)
+    for start in range(0, act.shape[0], chunk):
+        block = _np.where(act[start:start + chunk] > 0.0, 1.0, -1.0)
+        x_words = pack_binary_bits(block)
+        pos = binary_matmul_batched(x_words, w_pos_words, masks).astype(_np.float64)
+        neg = binary_matmul_batched(x_words, w_neg_words, masks).astype(_np.float64)
+        # The ±1 encodings double-count, hence the 0.5 factor (see identity above).
+        y[start:start + chunk] = 0.5 * (pos - neg) * scale[None, :]
+
+    if bias is not None:
+        b = bias.detach().cpu().numpy() if isinstance(bias, torch.Tensor) else bias
+        if b is not None:
+            y = y + _np.asarray(b, dtype=_np.float64)[None, :]
+    return y
+

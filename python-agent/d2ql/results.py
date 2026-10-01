@@ -65,12 +65,16 @@ class RunResult:
     wall_clock_s: float
     device: str
     seed: int
+    # P1: full throughput-vs-batch curve ({"<batch>": {samples_per_sec, ...}}).
+    # Defaulted field, so it must stay after every non-default field above.
+    throughput_by_batch: dict = field(default_factory=dict)
     extra: dict = field(default_factory=dict)
 
     def to_csv_row(self) -> dict[str, Any]:
         row = asdict(self)
-        # Flatten the nested extra dict into JSON text to keep the CSV 2-D.
+        # Flatten the nested dicts into JSON text to keep the CSV 2-D.
         row["extra"] = json.dumps(row.get("extra", {}))
+        row["throughput_by_batch"] = json.dumps(row.get("throughput_by_batch", {}))
         return row
 
     @staticmethod
@@ -93,6 +97,7 @@ class RunResult:
             "latency_n_samples",
             "throughput_pps",
             "throughput_batch_size",
+            "throughput_by_batch",
             "params",
             "packed_size_mb",
             "flops",

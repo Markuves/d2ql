@@ -25,6 +25,7 @@ PRECISION_BITS = {
     "4": 4,
     "8": 8,
     "16": 16,
+    "bf16": 16,
     "32": 32,
 }
 
@@ -32,7 +33,7 @@ GRID_PRECISIONS = frozenset({"ternary", "4", "8"})
 
 
 def parse_precision(value: object) -> str:
-    """Resolve agent.precision to one of: ternary, 4, 8, 16, 32."""
+    """Resolve agent.precision to one of: ternary, 4, 8, 16, bf16, 32."""
     if value in (1.58, "1.58"):
         return "ternary"
     if isinstance(value, float) and abs(value - 1.58) < 1e-6:
@@ -43,7 +44,7 @@ def parse_precision(value: object) -> str:
         key = str(value).strip().lower()
     if key not in PRECISION_BITS:
         raise ValueError(
-            f"Unknown precision '{value}'. Use one of: ternary, 4, 8, 16, 32."
+            f"Unknown precision '{value}'. Use one of: ternary, 4, 8, 16, bf16, 32."
         )
     return key
 
@@ -55,6 +56,8 @@ def precision_bits(name: str) -> float:
 def compute_dtype(name: str) -> torch.dtype:
     if name == "16":
         return torch.float16
+    if name == "bf16":
+        return torch.bfloat16
     return torch.float32
 
 
@@ -173,6 +176,28 @@ def lowbit_deploy_matmul(
     return lowbit_real_matmul(x, weight, bias)
 
 
+def lowbit_ternary_matmul(
+    x: torch.Tensor,
+    weight: torch.Tensor,
+    bias: Optional[torch.Tensor],
+) -> torch.Tensor:
+    """CPU ternary deploy matmul via the bit-packed two-pass kernel (P3).
+
+    Replaces the int8 CPU path for ternary weights. Instead of emulating an
+    int8 x int8 GEMM (which has no fast path without VNNI and is slower than
+    fp32), it splits the ternary weights into two binary matrices and runs the
+    XOR+popcount kernel twice — the only formulation that can genuinely beat
+    fp32 on this CPU. Returns fp32.
+    """
+    from d2ql.kernels import ternary_matmul_batched
+
+    w = weight.float() if isinstance(weight, torch.Tensor) else weight
+    b = bias.float() if isinstance(bias, torch.Tensor) else bias
+    xf = x.float() if isinstance(x, torch.Tensor) else x
+    y = ternary_matmul_batched(xf, w, b)
+    return torch.as_tensor(y, dtype=torch.float32, device=x.device)
+
+
 def model_macs(
     state_dim: int,
     hidden_size: int,
@@ -281,9 +306,12 @@ class NativeBitLinear(nn.Module):
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         if self.deploy:
-            # B1: real low-bit kernel for inference / latency benchmark.
-            # Dispatch to the selected backend (Triton by default, int_mm fallback).
+            # B1/P3: real low-bit kernel for inference / latency benchmark.
+            # On CPU, ternary weights use the bit-packed two-pass kernel (P3);
+            # on CUDA (and for int4/int8) dispatch to int_mm / Triton.
             with torch.no_grad():
+                if self.precision == "ternary" and x.device.type == "cpu":
+                    return lowbit_ternary_matmul(x, self.weight, self.bias)
                 return lowbit_deploy_matmul(x, self.weight, self.bias)
         weight = QuantizeSTE.apply(self.weight, self.precision, 0)
         bias = (
