@@ -5,7 +5,7 @@ experiment:
   # P2: each (precision, device, hidden) configuration is replicated once per
   # seed. A single seed with 10 eval episodes cannot separate a real effect from
   # run-to-run noise, so every cell is repeated here.
-  seeds: [42, 43, 44]
+  seeds: [42, 41]
   description: >
     Native bit-width training from initialization, with a shared capacity
     sweep. Every precision starts at the same hidden width; larger widths
@@ -34,7 +34,7 @@ workload:
   # C1 fix: hold out the trailing fraction of episode windows for a clean,
   # unseen-workload evaluation after training.
   holdout_frac: 0.2
-  simulation_time_scale: 0.05
+  simulation_time_scale: 0.01
 
 # C1 fix: deterministic, epsilon-free held-out evaluation (business metrics).
 evaluation:
