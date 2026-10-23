@@ -1,6 +1,11 @@
 #!/usr/bin/env python
 """Pareto analysis of the H4 precision x capacity sweep (P1).
 
+Nota (post-H6): el `norm_reward` y `eval_mean_reward` son recompensas
+solo por energía (`-energy_delta / E_step_max`), no la fórmula multi-objetivo
+histórica con pesos adaptativos (`w_sla`, `w_energy`, `w_cost`).
+"""
+
 Reads the aggregate results CSV produced by ``main.py`` and reports, for a chosen
 quality metric:
 

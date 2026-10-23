@@ -1,5 +1,7 @@
 # Sugerencias de mejora — proyecto d2ql (CloudSim + DDQL load balancing)
 
+> **Nota histórica (post-H6).** El reward multi-objetivo con pesos adaptativos (`w_sla`, `w_energy`, `w_cost`) descrito en este documento fue reemplazado por la fórmula de **recompensa solo por energía** (`r_t = -energy_delta / E_step_max`, ver `docs/h6_energy_reward.md`). Las secciones sobre `phi_sla`, `phi_energy`, `phi_util`, `update_weights` y los pesos son referencia histórica; el código actual usa `RewardManager` con una única métrica de energía.
+
 ## Estado de implementación (actualizado)
 
 | ítem | Estado |

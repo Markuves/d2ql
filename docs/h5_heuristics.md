@@ -38,11 +38,12 @@ Las columnas espejan las de `h4_results.csv` (`eval_mean_reward`,
 
 ### Nota sobre el reward
 
-Las heurísticas usan los **pesos de reward iniciales** (fijos, no adaptativos,
-`w_sla=0.4, w_energy=0.3, w_cost=0.3`), mientras el eval de H4 usa los pesos ya
-adaptados por el entrenamiento. Por eso la comparación **más justa** son las
-**métricas de negocio** (makespan/SLA/energía/coste), que son independientes de
-los pesos. El reward también se reporta, pero con esa salvedad.
+El reward de H6 es **solo por energía** (`r_t = -energy_delta / E_step_max`),
+neutro respecto a SLA y utilización. Las heurísticas usan esta misma fórmula
+(por compatibilidad con `main.py`), sin pesos adaptativos. La comparación
+**más justa** sigue siendo las **métricas de negocio** (makespan/SLA/energía/coste),
+que son independientes del reward. El `eval_mean_reward` se reporta como referencia
+únicamente.
 
 ## Configuración
 

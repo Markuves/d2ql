@@ -51,6 +51,8 @@ fuera de alcance** (documentado como pendiente, no aplicado).
 una misma precisión (σ ≈ 3) es del mismo tamaño que el efecto que se quiere medir: cualquier
 "óptimo" elegido así es ruido. El SLA no es un eje útil mientras esté estructuralmente en 0.
 
+> **Nota post-H6:** el "reward" mencionado es la recompensa solo por energía (`-energy_delta / E_step_max`), no la fórmula multi-objetivo con pesos adaptativos (`w_sla`, `w_energy`, `w_cost`).
+
 **Qué cambió.**
 
 | Archivo | Cambio |

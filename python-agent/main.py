@@ -50,17 +50,6 @@ DEFAULT_CONFIG = {
         "checkpoint_dir": "outputs/checkpoints",
         "tensorboard_dir": "outputs/tensorboard",
     },
-    "reward": {
-        "target_utilization": 0.70,
-        "migration_penalty": 0.10,
-        "weight_lr": 0.01,
-        "w_perf_floor": 0.2,
-        "w_energy_floor": 0.1,
-        "w_cost_floor": 0.1,
-        "w_perf_init": 0.4,
-        "w_energy_init": 0.3,
-        "w_cost_init": 0.3,
-    },
     "workload": {
         "trace_path": "data/workload.csv.gz",
         "episode_length": 50,
@@ -233,8 +222,6 @@ def _run_one_heuristic(config: dict, policy_name: str) -> None:
 
     logger.info("Initializing CloudSimEnv for heuristic '%s'...", policy_name)
     env = CloudSimEnv(config)
-    # Fixed (initial) reward weights — heuristics do not adapt them. The
-    # weight-independent business metrics remain the fair comparison axis.
     reward_manager = RewardManager(config)
 
     total_reward = 0.0
@@ -298,7 +285,6 @@ def _run_one_heuristic(config: dict, policy_name: str) -> None:
     lat_p50 = float(np.percentile(dt, 50)) if dt.size else float("nan")
     lat_p95 = float(np.percentile(dt, 95)) if dt.size else float("nan")
 
-    weights = reward_manager.get_current_weights()
     logger.info(
         "H5 '%s' eval: mean_reward=%.4f | makespan=%.2f | sla_rate=%.4f | "
         "energy=%.2f | cost=%.4f | decision_lat=%.4f ms",
@@ -328,7 +314,6 @@ def _run_one_heuristic(config: dict, policy_name: str) -> None:
         wall_clock_s=wall_clock_s,
         seed=seed,
         extra={
-            "reward_weights": weights,
             "mi_scale": trace_loader.sim_time_scale,
             "simulation_time_scale": trace_loader.sim_time_scale,
         },
@@ -643,42 +628,21 @@ def _run_one_training(config: dict) -> None:
         energy = info.get("energy", 0.0)
         cost = info.get("cost", 0.0)
 
-        delta_perf = (
-            0.0 if prev_makespan is None
-            else (prev_makespan - makespan) / max(prev_makespan, 1e-6)
-        )
-        delta_energy = (
-            0.0 if prev_energy is None
-            else (prev_energy - energy) / max(prev_energy, 1e-6)
-        )
-        delta_cost = (
-            0.0 if prev_cost is None
-            else (prev_cost - cost) / max(prev_cost, 1e-6)
-        )
-
-        reward_manager.update_weights(
-            delta_perf=delta_perf,
-            delta_energy=delta_energy,
-            delta_cost=delta_cost
-        )
-
         prev_makespan = makespan
         prev_energy = energy
         prev_cost = cost
 
         avg_loss = episode_loss / max(step_count, 1)
         avg_q = episode_mean_q / max(step_count, 1)
-        w = reward_manager.get_current_weights()
 
         logger.info(
             "Episode %d/%d | Reward: %.4f | Avg Loss: %.6f | "
-            "Epsilon: %.4f | Cloudlets: %d | Weights: %s",
+            "Epsilon: %.4f | Cloudlets: %d",
             episode + 1, n_episodes,
             episode_reward,
             avg_loss,
             agent.epsilon,
             len(cloudlets),
-            w
         )
 
         metrics.log_episode(
@@ -688,12 +652,6 @@ def _run_one_training(config: dict) -> None:
             energy=energy,
             cost=cost,
             epsilon=agent.epsilon,
-        )
-        metrics.log_weights(
-            episode=episode + 1,
-            w_sla=w["w_sla"],
-            w_energy=w["w_energy"],
-            w_cost=w["w_cost"],
         )
         metrics.log_training(
             step=episode + 1,

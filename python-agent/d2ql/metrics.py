@@ -38,23 +38,6 @@ class MetricsLogger:
         self.writer.flush()
 
     # ------------------------------------------------------------------
-    # Adaptive weight metrics
-    # ------------------------------------------------------------------
-
-    def log_weights(
-        self,
-        episode: int,
-        w_sla: float,
-        w_energy: float,
-        w_cost: float,
-    ) -> None:
-        """Log reward manager adaptive weights."""
-        self.writer.add_scalar("weights/w_sla", w_sla, episode)
-        self.writer.add_scalar("weights/w_energy", w_energy, episode)
-        self.writer.add_scalar("weights/w_cost", w_cost, episode)
-        self.writer.flush()
-
-    # ------------------------------------------------------------------
     # Agent / training metrics
     # ------------------------------------------------------------------
 
