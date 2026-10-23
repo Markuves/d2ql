@@ -37,13 +37,8 @@ queue:
   urgency_weight: 0.6
   demand_weight: 0.4
 
-# Fixed, non-adaptive reward weights used to score the heuristics. Kept at the
-# H4 initial weights so the reward is comparable; the weight-independent
-# business metrics (makespan/SLA/energy/cost) stay comparable regardless.
+# Energy-only reward (Task 2): r_t = -energy_delta / E_step_max.
 reward:
-  # Energy-only (Task 2): adaptive weights removed.
-  target_utilization: 0.70
-  migration_penalty: 0.10
   e_step_max_wh: 0.2694
 
 # Traditional load-balancing baselines to sweep (no training).

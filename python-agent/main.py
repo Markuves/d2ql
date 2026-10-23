@@ -572,10 +572,6 @@ def _run_one_training(config: dict) -> None:
 
     wall_start = _time.perf_counter()
 
-    prev_makespan = None
-    prev_energy = None
-    prev_cost = None
-
     # Best *deterministic* evaluation (sum of rewards over an eval window).
     best_eval_reward = float("-inf")
     best_eval_episode = 0
@@ -627,10 +623,6 @@ def _run_one_training(config: dict) -> None:
         makespan = info.get("makespan", 0.0)
         energy = info.get("energy", 0.0)
         cost = info.get("cost", 0.0)
-
-        prev_makespan = makespan
-        prev_energy = energy
-        prev_cost = cost
 
         avg_loss = episode_loss / max(step_count, 1)
         avg_q = episode_mean_q / max(step_count, 1)

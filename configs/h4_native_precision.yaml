@@ -100,11 +100,9 @@ results:
   csv_dir: "outputs/results"
 
 reward:
-  # Energy-only design (Task 2): r_t = -energy_delta / E_step_max.
+  # Energy-only (Task 2): r_t = -energy_delta / E_step_max.
   # Old adaptive weights (w_perf_init, w_energy_init, w_cost_init,
   # weight_lr, floors) are deprecated and ignored by RewardManager.
-  target_utilization: 0.70  # kept for benchmark reference only
-  migration_penalty: 0.10
   # E_step_max = sum([250, 200, 300, 220]) * 1.0s / 3600 = ~0.2694 wh
   e_step_max_wh: 0.2694
 
