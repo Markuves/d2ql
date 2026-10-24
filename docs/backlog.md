@@ -7,9 +7,9 @@ Reemplaza a los históricos `h4_early_stopping_y_resultados.md`, `h6_energy_rewa
 `r1_recommendations.md` y `r2_decisiones_precision_capacidad.md` (eliminados). `h5_heuristics.md`
 sigue siendo el documento operativo de ese experimento.
 
-> Última revisión: **2026-10-24** (segunda tanda: EVAL-01, EVAL-06, CSV-04, REPO-01, REPO-02,
-> REPO-04, REPO-05, SIM-05, PERF-03). Alcance: `python-agent/`, `java-sim/`, `configs/`, `tests/`,
-> `docs/`, `notebooks/`, `docker-compose*.yml`, `pyproject.toml`.
+> Última revisión: **2026-10-24** (tercera tanda: auditoría de TensorBoard con dos corridas reales —
+> 6 hallazgos nuevos, sin cambios de código todavía). Alcance: `python-agent/`, `java-sim/`,
+> `configs/`, `tests/`, `docs/`, `notebooks/`, `docker-compose*.yml`, `pyproject.toml`.
 
 ---
 
@@ -54,7 +54,7 @@ docker run --rm --network d2ql-smoke --user $(id -u):$(id -g) \
 
 | Estado | P0 | P1 | P2 | P3 | Total |
 |---|---|---|---|---|---|
-| propuesto | 0 | 1 | 4 | 2 | 7 |
+| propuesto | 0 | 5 | 5 | 3 | 13 |
 | hecho | 0 | 0 | 0 | 0 | 29 |
 | descartado | 1 | 1 | 0 | 0 | 2 + 5 históricos |
 | bloqueado | 0 | 0 | 0 | 0 | 0 (4 decisiones abiertas) |
@@ -75,6 +75,53 @@ Lo que falta para publicar cifras nuevas es **re-correr el sweep** con este cód
   FLOPs distintos).
 - **Fix:** incluir `n_hidden_layers` en `GROUP_KEYS`.
 - **Criterio:** nº de celdas = precisiones × devices × anchos × profundidades.
+
+#### LOG-04 · `episode/avg_loss` y `episode/mean_q` incluyen el warm-up
+- **Estado:** propuesto · **P1**
+- **Evidencia (auditoría TB, 6 episodios, `replay_buffer_warmup=10`):** el primer episodio registró
+  `episode/avg_loss=0.0799` cuando la media real de sus 12 updates (`train/loss` en los pasos
+  globales 1–12) es **0.1355** → el valor publicado es **0.59×** el real. Lo mismo en
+  `episode/mean_q` (0.0290 vs 0.0521). En los episodios 2–6 la razón es 0.99–1.01.
+  Causa: `episode_loss / step_count` y `episode_mean_q / step_count` dividen por **pasos de entorno**
+  (22 en el episodio 1), pero solo hay 12 updates; los 10 pasos de warm-up aportan 0.
+- **Impacto:** el primer punto de las curvas de pérdida/Q es ~1.7× más bajo que la realidad; cualquier
+  episodio más corto que el warm-up se registraría como 0.
+- **Fix:** dividir por el número de updates del episodio (contador que solo avanza cuando
+  `train_step` actualiza) y, si es 0, no registrar el punto.
+- **Criterio:** `episode/avg_loss` == media de `train/loss` del mismo rango de pasos (|Δ| < 1e-6).
+
+#### LOG-05 · `episode/total_reward` es redundante con `episode/energy` y mide la duración
+- **Estado:** propuesto · **P1**
+- **Evidencia:** `reward == -energy / E_step_max` exacto en los 6 episodios (comprobado con
+  `np.allclose`): los dos tags son la misma información reescalada. Además
+  `corr(nº de pasos, total_reward) = -0.933`, con `reward/paso = -0.468 ± 0.013` (CV 2.8 %) y
+  episodios de 18–22 pasos. Es decir: la curva de reward enseña sobre todo **cuánto duró el episodio**.
+- **Fix:** registrar `episode/steps` y `episode/reward_per_step` (y `episode/energy_per_step`), dejando
+  el total como acumulado; opcionalmente marcar `episode/energy` como derivada del reward.
+- **Criterio:** `reward_per_step` tiene varianza propia y la correlación reward↔steps deja de dominar.
+
+#### LOG-07 · El 86 % de la energía registrada es el piso idle
+- **Estado:** propuesto · **P1**
+- **Evidencia:** piso idle = `sum(HOST_IDLE_WATT)=390 W` → **0.10833 Wh/paso**; la energía medida por
+  paso es 0.1213–0.1308 Wh, así que el **82.8–89.3 %** de `episode/energy` es una constante que no
+  depende de la política. La parte dinámica (lo único que el agente puede mover) es
+  **0.013–0.022 Wh/paso**. Coherente con SIM-08: el makespan es 0.6–1.2 % de la duración del episodio.
+- **Impacto:** el reward discrimina poco entre políticas y su varianza está dominada por la duración
+  del episodio, no por la colocación.
+- **Fix:** registrar `episode/dynamic_energy` (= `energy − idle_floor × steps`) y `episode/steps`;
+  usarlo como eje de calidad secundario.
+
+#### SIM-08 · El episodio sigue vivo después del último cloudlet
+- **Estado:** propuesto · **P1**
+- **Evidencia:** con 10 cloudlets por episodio, el `makespan` es 0.12–0.27 s mientras el episodio dura
+  18–22 s simulados: se despacha un cloudlet por paso (10 pasos) y el simulador sigue avanzando ~10 s
+  más sin trabajo pendiente (VM/datacenter con eventos). La mitad de los pasos y el 86 % de la energía
+  son piso idle.
+- **Impacto:** coste de entrenamiento y ruido en el reward (LOG-07); el agente no puede influir en esa
+  fracción.
+- **Fix:** terminar el episodio cuando no queden cloudlets pendientes y todos hayan terminado (o no
+  emitir eventos de VM al reconstruir), midiendo el efecto en `energy` y `makespan`.
+- **Criterio:** duración del episodio ≈ `makespan` + margen pequeño y `reward/paso` estable.
 
 ### P2 — deuda
 
@@ -116,6 +163,16 @@ Lo que falta para publicar cifras nuevas es **re-correr el sweep** con este cód
 - **Fix:** medir el tiempo de `_run_heldout_eval` y, si pesa, bajar `evaluation.n_episodes`
   (10 → 5) manteniendo la cobertura, o cachear las ventanas de evaluación por corrida.
 
+#### LOG-06 · Se escriben escalares `NaN` cuando no hay eval o no hay benchmark
+- **Estado:** propuesto · **P2**
+- **Evidencia (auditoría TB, corrida con `evaluation.n_episodes=0` y `latency.benchmark: false`):** los
+  8 tags de `eval/*` y `perf/*` se crean con **1 punto NaN** cada uno. En TensorBoard eso produce
+  series vacías/saltos en vez de "sin dato".
+- **Fix:** filtrar los valores no finitos en `MetricsLogger.log_eval`/`log_perf` (y en
+  `log_episode_diagnostics`) y avisar por log de que la métrica no se midió.
+- **Criterio:** un run sin evaluación ni benchmark no genera ningún tag `eval/*`/`perf/*` (o ninguno con
+  valores no finitos).
+
 ### P3 — opcional
 
 #### PERF-02 · El notebook mide "tamaño" con `capas × neuronas × bits`
@@ -129,6 +186,15 @@ Lo que falta para publicar cifras nuevas es **re-correr el sweep** con este cód
 - **Evidencia:** vive en `python-agent/` (fuera del paquete), así que no hay entry point y hay que
   invocarlo con `python analyze_pareto.py` desde ese directorio.
 - **Fix:** moverlo a `d2ql/pareto.py` y añadir `pareto = "d2ql.pareto:main"` en `[project.scripts]`.
+
+#### LOG-08 · Faltan series para diagnosticar el entrenamiento
+- **Estado:** propuesto · **P3**
+- **Evidencia:** TB registra `train/loss` y `train/mean_q`, pero no `learning_rate`, norma de gradiente,
+  TD-error medio, ni la **ventana de reward que decide el early stopping**; el `es_reason` solo queda en
+  el CSV. Tampoco hay `episode/steps` (ver LOG-05).
+- **Fix:** añadir `train/lr`, `train/grad_norm`, `train/td_error_abs_mean`, `eval/window_mean` (la
+  métrica real del stopper) y texto del motivo de parada.
+- **Criterio:** se puede explicar en TB por qué una corrida paró antes y con qué magnitud de gradiente.
 
 ---
 
