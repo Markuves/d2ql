@@ -74,7 +74,7 @@ def load_results(path: Path) -> pd.DataFrame:
     for col in [
         "flops", "effective_capacity_bits", "packed_size_mb", "latency_mean_ms",
         "latency_p95_ms", "throughput_pps", "params", "bits", "seed",
-        "eval_mean_reward", "norm_reward", "eval_makespan", "eval_sla_rate",
+        "eval_mean_reward", "eval_norm_reward", "norm_reward", "eval_makespan",
         "wall_clock_s",
     ]:
         if col in df.columns:
@@ -206,7 +206,7 @@ def main() -> None:
     )
     parser.add_argument(
         "--quality", default="eval_mean_reward",
-        choices=["eval_mean_reward", "norm_reward"],
+        choices=["eval_mean_reward", "eval_norm_reward", "norm_reward"],
         help="Quality metric for the front",
     )
     parser.add_argument("--out", default="", help="Optional path to also write the markdown")

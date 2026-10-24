@@ -18,7 +18,7 @@ from typing import Optional
 
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
+import torch.nn.functional as F  # noqa: N812 -- idiomatic PyTorch alias
 
 PRECISION_BITS = {
     "ternary": 1.58,

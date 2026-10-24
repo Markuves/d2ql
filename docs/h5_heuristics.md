@@ -27,14 +27,14 @@ Se escriben en `outputs/results/h5_results.csv` (una fila por heurística):
 
 - `eval_mean_reward` — reward medio sobre los episodios held-out
 - `eval_makespan` — makespan medio
-- `eval_sla_violations`, `eval_sla_rate` — violaciones de SLA (y tasa por cloudlet)
 - `mean_energy`, `mean_cost` — energía y coste medios por episodio
 - `decision_latency_mean_ms`, `_p50_ms`, `_p95_ms` — latencia por decisión
   (análoga a la latencia de inferencia del modelo en H4)
-- `wall_clock_s`, `seed`, `notes`, `extra`
+- `wall_clock_s`, `seed`, `extra`
 
 Las columnas espejan las de `h4_results.csv` (`eval_mean_reward`,
-`eval_makespan`, `eval_sla_violations`, `eval_sla_rate`) para comparación directa.
+`eval_makespan`) para comparación directa. El eje SLA se retiró: el deadline del
+trace es un timestamp absoluto, así que el contador daba 0 siempre.
 
 ### Nota sobre el reward
 

@@ -1,11 +1,13 @@
 # d2ql: Double Deep Q-Network VM Scheduler
 
-`d2ql` is a reinforcement learning research platform designed to train a Double Deep Q-Network (DDQN) agent to optimize multi-objective virtual machine scheduling inside a CloudSimPlus simulation environment. 
+`d2ql` is a reinforcement learning research platform designed to train a Double Deep Q-Network (DDQN) agent to schedule virtual machines inside a CloudSimPlus simulation environment.
 
-The system simultaneously targets three competing objectives:
-1. **SLA Compliance** (Quality of Service)
-2. **Energy Consumption** (Physical host power profiles)
-3. **Operational Cost** (Accrued processing fees)
+The learning objective is a single, bounded signal:
+
+* **Energy** — the agent is rewarded with `r_t = -ΔE_t / E_step_max ∈ [-1, 0]`, where the datacenter power follows a convex, heterogeneous per-host model.
+
+Makespan and operational cost are logged alongside the reward as business metrics, but they no longer enter the reward (the SLA axis was retired: trace deadlines are absolute timestamps, so the violation counter was structurally zero — see `docs/backlog.md`).
+
 
 ---
 

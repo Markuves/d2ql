@@ -7,10 +7,6 @@ experiment:
     shuffled windows of the Azure Public Dataset V2 VM trace to learn
     a scheduling policy robust to varied workload patterns.
 
-datacenter:
-  n_cloud_hosts: 4
-  n_edge_nodes: 0
-
 py4j:
   host: "java-sim"
   port: 25333
@@ -19,10 +15,6 @@ workload:
   trace_path: "data/workload.csv.gz"
   episode_length: 50        # cloudlets per episode window
   shuffle: true             # H3: randomise window order each epoch
-
-queue:
-  urgency_weight: 0.6       # weight given to deadline urgency in priority score
-  demand_weight: 0.4        # weight given to resource demand in priority score
 
 agent:
   precision: "32"

@@ -1,11 +1,12 @@
-"""Persist per-run results so H4 combinations can be compared after the fact.
+"""Persist per-run results so H4/H5 combinations can be compared after the fact.
 
-For every (precision, hidden_size) combination we write:
+For every (precision, capacity, seed) combination we write:
 
-* ``<checkpoint_dir>/result.json``  -- full detail for that single run.
-* ``<results_dir>/h4_results.csv``  -- one row per combination, appended as each
-  run finishes, so you can diff reward/latency/capacity across the whole sweep
-  without re-opening TensorBoard.
+* ``<checkpoint_dir>/result.json``     -- full detail for that single run.
+* ``<results_dir>/h4_results.csv``     -- one row per combination, **upserted**
+  by ``(experiment_id, seed)`` so re-running a sweep replaces its row instead of
+  appending a duplicate (docs/backlog.md, CSV-02).
+* ``<results_dir>/h5_results.csv``     -- same idea for the heuristics.
 
 Latency is the *model inference* latency (forward pass only), measured with
 ``DDQNAgent.benchmark_inference`` -- independent of how fast the Java sim runs.
@@ -17,15 +18,48 @@ import csv
 import json
 import logging
 import threading
-from dataclasses import dataclass, field, asdict
-from datetime import datetime, timezone
+from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any
 
 logger = logging.getLogger(__name__)
 
-# Guard aggregate CSV appends so parallel runs never interleave writes.
+# Guard CSV read-modify-write cycles so parallel runs never interleave writes.
 _csv_write_lock = threading.Lock()
+
+
+def _upsert_rows(
+    csv_file: Path,
+    columns: list[str],
+    new_rows: list[dict[str, Any]],
+    key_fields: tuple[str, ...],
+) -> None:
+    """Replace-or-append ``new_rows`` in ``csv_file`` keyed by ``key_fields``.
+
+    Re-running an experiment must not duplicate its row: matching keys are
+    dropped before the new rows are written (CSV-02).
+    """
+    with _csv_write_lock:
+        existing: list[dict[str, Any]] = []
+        if csv_file.exists():
+            with open(csv_file, "r", newline="") as f:
+                existing = list(csv.DictReader(f))
+
+        def key_of(row: dict[str, Any]) -> tuple[str, ...]:
+            return tuple(str(row.get(k, "")) for k in key_fields)
+
+        replaced = {key_of(r) for r in new_rows}
+        kept = [r for r in existing if key_of(r) not in replaced]
+
+        tmp = csv_file.with_name(csv_file.name + ".tmp")
+        with open(tmp, "w", newline="") as f:
+            writer = csv.DictWriter(f, fieldnames=columns)
+            writer.writeheader()
+            for row in kept:
+                writer.writerow({k: row.get(k, "") for k in columns})
+            for row in new_rows:
+                writer.writerow({k: row.get(k, "") for k in columns})
+        tmp.replace(csv_file)
 
 
 @dataclass
@@ -38,9 +72,10 @@ class RunResult:
     episodes_trained: int
     stopped_early: bool
     best_episode: int
+    # Mean per-episode reward over the best trailing window of evaluations
+    # (NOT a sum: see CSV-01). The window is `early_stopping.window_size`
+    # evaluations, each one averaging `eval_every` episodes.
     best_mean_reward: float
-    best_eval_reward: float
-    best_eval_episode: int
     latency_mean_ms: float
     latency_p50_ms: float
     latency_p95_ms: float
@@ -53,15 +88,15 @@ class RunResult:
     # B2: compute-cost normalization axes so the Pareto compares real cost.
     flops: float
     effective_capacity_bits: float
-    # C2: reward normalized per step.
+    # C2/CSV-01: reward normalized per step (same units as a single reward).
     avg_steps: float
     norm_reward: float
     # C1: held-out evaluation with business metrics (on unseen workload).
     eval_episodes: int
     eval_mean_reward: float
+    eval_avg_steps: float
+    eval_norm_reward: float
     eval_makespan: float
-    eval_sla_violations: float
-    eval_sla_rate: float
     wall_clock_s: float
     device: str
     seed: int
@@ -89,8 +124,6 @@ class RunResult:
             "stopped_early",
             "best_episode",
             "best_mean_reward",
-            "best_eval_reward",
-            "best_eval_episode",
             "latency_mean_ms",
             "latency_p50_ms",
             "latency_p95_ms",
@@ -106,9 +139,9 @@ class RunResult:
             "norm_reward",
             "eval_episodes",
             "eval_mean_reward",
+            "eval_avg_steps",
+            "eval_norm_reward",
             "eval_makespan",
-            "eval_sla_violations",
-            "eval_sla_rate",
             "wall_clock_s",
             "device",
             "seed",
@@ -134,8 +167,6 @@ class HeuristicResult:
     eval_episodes: int
     eval_mean_reward: float
     eval_makespan: float
-    eval_sla_violations: float
-    eval_sla_rate: float
     mean_energy: float
     mean_cost: float
     decision_latency_mean_ms: float
@@ -159,8 +190,6 @@ class HeuristicResult:
             "eval_episodes",
             "eval_mean_reward",
             "eval_makespan",
-            "eval_sla_violations",
-            "eval_sla_rate",
             "mean_energy",
             "mean_cost",
             "decision_latency_mean_ms",
@@ -177,7 +206,7 @@ def _heuristic_csv_path(results_dir: Path) -> Path:
 
 
 def save_heuristic_result(result: HeuristicResult, checkpoint_dir: str, results_dir: str) -> None:
-    """Write result.json next to the checkpoint and append a row to h5_results.csv."""
+    """Write result.json next to the checkpoint and upsert a row in h5_results.csv."""
     ckpt = Path(checkpoint_dir)
     ckpt.mkdir(parents=True, exist_ok=True)
     out_dir = Path(results_dir)
@@ -188,16 +217,13 @@ def save_heuristic_result(result: HeuristicResult, checkpoint_dir: str, results_
         json.dump(asdict(result), f, indent=2, default=str)
     logger.info("Heuristic result written to %s", result_path)
 
-    row = result.to_csv_row()
-    columns = HeuristicResult.csv_columns()
     csv_file = _heuristic_csv_path(out_dir)
-    write_header = not csv_file.exists()
-    with _csv_write_lock:
-        with open(csv_file, "a", newline="") as f:
-            writer = csv.DictWriter(f, fieldnames=columns)
-            if write_header:
-                writer.writeheader()
-            writer.writerow({k: row.get(k, "") for k in columns})
+    _upsert_rows(
+        csv_file,
+        HeuristicResult.csv_columns(),
+        [result.to_csv_row()],
+        key_fields=("experiment_id", "policy", "seed"),
+    )
     logger.info("Aggregate heuristic results updated: %s", csv_file)
 
 
@@ -211,7 +237,7 @@ def load_heuristic_results_csv(results_dir: str) -> list[dict]:
 
 
 def save_run_result(result: RunResult, checkpoint_dir: str, results_dir: str) -> None:
-    """Write result.json next to the checkpoint and append a row to results.csv."""
+    """Write result.json next to the checkpoint and upsert a row in h4_results.csv."""
     ckpt = Path(checkpoint_dir)
     ckpt.mkdir(parents=True, exist_ok=True)
     out_dir = Path(results_dir)
@@ -223,18 +249,13 @@ def save_run_result(result: RunResult, checkpoint_dir: str, results_dir: str) ->
         json.dump(asdict(result), f, indent=2, default=str)
     logger.info("Run result written to %s", result_path)
 
-    # Append to the aggregate CSV. Guard with a lock so that parallel runs
-    # (if ever enabled) never interleave writes.
-    row = result.to_csv_row()
-    columns = RunResult.csv_columns()
     csv_file = _csv_path(out_dir)
-    write_header = not csv_file.exists()
-    with _csv_write_lock:
-        with open(csv_file, "a", newline="") as f:
-            writer = csv.DictWriter(f, fieldnames=columns)
-            if write_header:
-                writer.writeheader()
-            writer.writerow({k: row.get(k, "") for k in columns})
+    _upsert_rows(
+        csv_file,
+        RunResult.csv_columns(),
+        [result.to_csv_row()],
+        key_fields=("experiment_id", "seed"),
+    )
     logger.info("Aggregate results updated: %s", csv_file)
 
 

@@ -5,7 +5,7 @@ experiment:
   # P2: each (precision, device, hidden) configuration is replicated once per
   # seed. A single seed with 10 eval episodes cannot separate a real effect from
   # run-to-run noise, so every cell is repeated here.
-  seeds: [42, 43, 44]
+  seeds: [42, 41]
   description: >
     Native bit-width training from initialization, with a shared capacity
     sweep. Every precision starts at the same hidden width; larger widths
@@ -18,10 +18,6 @@ experiment:
     native float32 dtype. fp16 and bf16 run under AMP autocast over fp32 master
     weights (see agent.py): fp16 with a GradScaler, bf16 without one because its
     exponent range already matches fp32.
-
-datacenter:
-  n_cloud_hosts: 4
-  n_edge_nodes: 0
 
 py4j:
   host: "java-sim"
@@ -39,10 +35,6 @@ workload:
 # C1 fix: deterministic, epsilon-free held-out evaluation (business metrics).
 evaluation:
   n_episodes: 10
-
-queue:
-  urgency_weight: 0.6
-  demand_weight: 0.4
 
 agent:
   precision: "32"          # overridden per run from native_precision.precisions
@@ -89,7 +81,7 @@ latency:
   # P1: single-sample latency is launch-bound, so the throughput-vs-batch curve is
   # what actually exposes a kernel advantage. Every batch listed here is measured
   # and stored per run in the results CSV column `throughput_by_batch`.
-  throughput_batch_sizes: [1, 8, 32, 128]
+  throughput_batch_sizes: [1, 8, 32, 128, 256, 512, 1024]
   # Primary batch kept in the scalar `throughput_pps` / `throughput_batch_size`
   # columns for backward compatibility.
   throughput_batch_size: 64

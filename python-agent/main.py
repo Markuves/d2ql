@@ -21,9 +21,6 @@ DEFAULT_CONFIG = {
         "hypothesis": "none",
         "seed": 42
     },
-    "datacenter": {
-        "n_cloud_hosts": 4,
-    },
     "agent": {
         "precision": "32",
         "hidden_size": 256,
@@ -52,10 +49,6 @@ DEFAULT_CONFIG = {
         "trace_path": "data/workload.csv.gz",
         "episode_length": 50,
         "shuffle": True,
-    },
-    "queue": {
-        "urgency_weight": 0.6,
-        "demand_weight": 0.4,
     },
     "py4j": {
         "host": "java-sim",
@@ -86,10 +79,14 @@ def _run_heldout_eval(
 ) -> dict:
     """Deterministic, epsilon-free evaluation on held-out workload (C1 fix).
 
-    Runs every held-out episode greedily and reports business metrics
-    (mean reward, makespan, SLA violations and SLA rate per cloudlet) so the
+    Runs every held-out episode greedily and reports business metrics (mean
+    reward, makespan, average episode length and reward per step) so the
     precision x capacity comparison uses clean, workload-independent numbers
-    instead of the noisy training-time reward sum.
+    instead of the noisy training-time window sum.
+
+    The SLA axis is gone: trace deadlines are absolute timestamps compared
+    against a clock of ~170 simulated seconds, so the violation counter was
+    structurally zero (docs/backlog.md, SIM-01).
     """
     n_episodes = len(eval_cloudlets)
     if n_episodes == 0:
@@ -97,49 +94,47 @@ def _run_heldout_eval(
             "eval_episodes": 0,
             "eval_mean_reward": float("nan"),
             "eval_makespan": float("nan"),
-            "eval_sla_violations": 0.0,
-            "eval_sla_rate": float("nan"),
+            "eval_avg_steps": float("nan"),
+            "eval_norm_reward": float("nan"),
         }
 
     total_reward = 0.0
-    total_cloudlets = 0
+    total_steps = 0
     makespans: list[float] = []
 
     for cloudlets in eval_cloudlets:
         obs, _ = env.reset(cloudlets=cloudlets)
         ep_reward = 0.0
+        step_count = 0
         terminated = False
         truncated = False
         info: dict = {}
         while not (terminated or truncated):
             action = agent.select_action(obs, evaluate=True)  # greedy
             obs, _, terminated, truncated, info = env.step(action)
-            ep_reward += reward_manager.compute_step_reward(
-                energy_delta=info.get("energy_delta", 0.0),
-                sla_violations_this_step=info.get("sla_violations", 0.0),
-                host_cpu_utilizations=info.get("cpu_utilizations", []),
-            )
+            ep_reward += reward_manager.compute_step_reward(info.get("energy_delta", 0.0))
+            step_count += 1
         total_reward += ep_reward
-        total_cloudlets += len(cloudlets)
-        makespans.append(info.get("makespan", 0.0))
+        total_steps += step_count
+        makespans.append(float(info.get("makespan", 0.0)))
 
-    # Distinct SLA violations (A2 fix) across the held-out episodes.
-    sla = float(env.sim.getSlaViolationCount()) if hasattr(env.sim, "getSlaViolationCount") else 0.0
     avg_makespan = sum(makespans) / max(len(makespans), 1)
     avg_reward = total_reward / max(n_episodes, 1)
-    sla_rate = sla / max(total_cloudlets, 1)
+    avg_steps = total_steps / max(n_episodes, 1)
+    # Reward per step: same units as a single step reward, i.e. in [-1, 0].
+    norm_reward = avg_reward / avg_steps if avg_steps > 0 else float("nan")
 
     logger.info(
-        "Held-out eval: %d episodes | mean_reward=%.4f | makespan=%.2f | "
-        "sla_violations=%.0f | sla_rate=%.4f",
-        n_episodes, avg_reward, avg_makespan, sla, sla_rate,
+        "Held-out eval: %d episodes | mean_reward=%.4f | norm_reward=%.4f | "
+        "steps/ep=%.1f | makespan=%.2f",
+        n_episodes, avg_reward, norm_reward, avg_steps, avg_makespan,
     )
     return {
         "eval_episodes": n_episodes,
         "eval_mean_reward": avg_reward,
         "eval_makespan": avg_makespan,
-        "eval_sla_violations": sla,
-        "eval_sla_rate": sla_rate,
+        "eval_avg_steps": avg_steps,
+        "eval_norm_reward": norm_reward,
     }
 
 
@@ -167,12 +162,12 @@ def _run_one_heuristic(config: dict, policy_name: str) -> None:
     """Evaluate a single heuristic on the SAME held-out workload as H4.
 
     Uses the identical CloudSim env, trace loader settings and RewardManager as
-    the DDQN runs, so makespan / SLA / energy / cost / reward are directly
-    comparable with the H4 agent rows.
+    the DDQN runs, so makespan / energy / cost / reward are directly comparable
+    with the H4 agent rows.
     """
     import time as _time
 
-    from d2ql.env import CloudSimEnv
+    from d2ql.env import N_HOSTS, CloudSimEnv
     from d2ql.heuristics import build_heuristic
     from d2ql.metrics import MetricsLogger
     from d2ql.results import HeuristicResult, save_heuristic_result
@@ -212,7 +207,7 @@ def _run_one_heuristic(config: dict, policy_name: str) -> None:
         "H5 heuristic '%s' | workload summary: %s", policy_name, trace_loader.summary()
     )
 
-    n_hosts = int(config["datacenter"]["n_cloud_hosts"])
+    n_hosts = N_HOSTS
     policy = build_heuristic(policy_name, n_hosts=n_hosts, seed=h5_seed)
 
     n_eval = int((config.get("evaluation") or {}).get("n_episodes", 10))
@@ -220,10 +215,9 @@ def _run_one_heuristic(config: dict, policy_name: str) -> None:
 
     logger.info("Initializing CloudSimEnv for heuristic '%s'...", policy_name)
     env = CloudSimEnv(config)
-    reward_manager = RewardManager(config)
+    reward_manager = RewardManager()
 
     total_reward = 0.0
-    total_cloudlets = 0
     makespans: list[float] = []
     energies: list[float] = []
     costs: list[float] = []
@@ -242,17 +236,12 @@ def _run_one_heuristic(config: dict, policy_name: str) -> None:
             action = policy.select_action(obs)
             decision_times.append((_time.perf_counter() - t0) * 1000.0)
             obs, _, terminated, truncated, info = env.step(action)
-            ep_reward += reward_manager.compute_step_reward(
-                energy_delta=info.get("energy_delta", 0.0),
-                sla_violations_this_step=info.get("sla_violations", 0.0),
-                host_cpu_utilizations=info.get("cpu_utilizations", []),
-            )
+            ep_reward += reward_manager.compute_step_reward(info.get("energy_delta", 0.0))
 
         mk = float(info.get("makespan", 0.0))
         en = float(info.get("energy", 0.0))
         co = float(info.get("cost", 0.0))
         total_reward += ep_reward
-        total_cloudlets += len(cloudlets)
         makespans.append(mk)
         energies.append(en)
         costs.append(co)
@@ -267,29 +256,22 @@ def _run_one_heuristic(config: dict, policy_name: str) -> None:
 
     wall_clock_s = _time.perf_counter() - wall_start
 
-    sla = (
-        float(env.sim.getSlaViolationCount())
-        if hasattr(env.sim, "getSlaViolationCount")
-        else 0.0
-    )
     n_eval_eps = len(eval_cloudlets)
     avg_reward = total_reward / max(n_eval_eps, 1)
     avg_makespan = sum(makespans) / max(len(makespans), 1)
     mean_energy = sum(energies) / max(len(energies), 1)
     mean_cost = sum(costs) / max(len(costs), 1)
-    sla_rate = sla / max(total_cloudlets, 1)
     dt = np.asarray(decision_times, dtype=np.float64)
     lat_mean = float(dt.mean()) if dt.size else float("nan")
     lat_p50 = float(np.percentile(dt, 50)) if dt.size else float("nan")
     lat_p95 = float(np.percentile(dt, 95)) if dt.size else float("nan")
 
     logger.info(
-        "H5 '%s' eval: mean_reward=%.4f | makespan=%.2f | sla_rate=%.4f | "
-        "energy=%.2f | cost=%.4f | decision_lat=%.4f ms",
+        "H5 '%s' eval: mean_reward=%.4f | makespan=%.2f | energy=%.2f | "
+        "cost=%.4f | decision_lat=%.4f ms",
         policy_name,
         avg_reward,
         avg_makespan,
-        sla_rate,
         mean_energy,
         mean_cost,
         lat_mean,
@@ -302,8 +284,6 @@ def _run_one_heuristic(config: dict, policy_name: str) -> None:
         eval_episodes=n_eval_eps,
         eval_mean_reward=avg_reward,
         eval_makespan=avg_makespan,
-        eval_sla_violations=sla,
-        eval_sla_rate=sla_rate,
         mean_energy=mean_energy,
         mean_cost=mean_cost,
         decision_latency_mean_ms=lat_mean,
@@ -560,7 +540,7 @@ def _run_one_training(config: dict) -> None:
         logger.info("Resuming from checkpoint: %s", resume_path)
         agent.load(resume_path)
 
-    reward_manager = RewardManager(config)
+    reward_manager = RewardManager()
     eval_every = config["training"]["eval_every_n_episodes"]
 
     logger.info(
@@ -570,10 +550,14 @@ def _run_one_training(config: dict) -> None:
 
     wall_start = _time.perf_counter()
 
-    # Best *deterministic* evaluation (sum of rewards over an eval window).
-    best_eval_reward = float("-inf")
-    best_eval_episode = 0
+    # Best evaluation window: **mean** per-episode reward over the trailing
+    # window of `eval_every` episodes (CSV-01). The window sum is divided by its
+    # length, so the value is on the same scale as one episode's reward and
+    # `norm_reward` is a genuine per-step reward in [-1, 0].
     eval_window_reward = 0.0  # accumulated reward since last eval boundary
+    eval_window_episodes = 0
+    best_window_mean = float("-inf")
+    best_window_episode = 0
     episodes_trained = 0
     steps_total = 0  # C2: accumulate steps across episodes for avg_steps
     stopped_early = False
@@ -595,25 +579,22 @@ def _run_one_training(config: dict) -> None:
             action = agent.select_action(obs)
             next_obs, _, terminated, truncated, info = env.step(action)
 
-            reward = reward_manager.compute_step_reward(
-                energy_delta=info.get("energy_delta", 0.0),
-                sla_violations_this_step=info.get("sla_violations", 0.0),
-                host_cpu_utilizations=info.get("cpu_utilizations", []),
-            )
+            reward = reward_manager.compute_step_reward(info.get("energy_delta", 0.0))
 
             done_flag = float(terminated or truncated)
             agent.memory.push(obs, action, reward, next_obs, done_flag)
 
-            loss = agent.train_step(episode)
+            loss, mean_q = agent.train_step(episode)
             episode_reward += reward
             episode_loss += loss
+            episode_mean_q += mean_q
             step_count += 1
             obs = next_obs
-            metrics.log_training(
-                step=max(agent.total_steps, step_count),
-                loss=loss,
-                mean_q=0.0,
-            )
+            # LOG-01: a single series on a single x-axis (the global update
+            # counter). During buffer warm-up there is no update, so nothing is
+            # logged and the axis never goes backwards.
+            if agent.total_steps > 0:
+                metrics.log_training(step=agent.total_steps, loss=loss, mean_q=mean_q)
 
         agent.decay_epsilon()
         steps_total += step_count  # C2
@@ -626,11 +607,12 @@ def _run_one_training(config: dict) -> None:
         avg_q = episode_mean_q / max(step_count, 1)
 
         logger.info(
-            "Episode %d/%d | Reward: %.4f | Avg Loss: %.6f | "
+            "Episode %d/%d | Reward: %.4f | Avg Loss: %.6f | Mean Q: %.4f | "
             "Epsilon: %.4f | Cloudlets: %d",
             episode + 1, n_episodes,
             episode_reward,
             avg_loss,
+            avg_q,
             agent.epsilon,
             len(cloudlets),
         )
@@ -643,10 +625,9 @@ def _run_one_training(config: dict) -> None:
             cost=cost,
             epsilon=agent.epsilon,
         )
-        metrics.log_training(
-            step=episode + 1,
-            loss=avg_loss,
-            mean_q=avg_q,
+        # Episode-level diagnostics live under episode/*, never in train/*.
+        metrics.log_episode_diagnostics(
+            episode=episode + 1, avg_loss=avg_loss, mean_q=avg_q
         )
         metrics.log_buffer(
             episode=episode + 1,
@@ -654,17 +635,18 @@ def _run_one_training(config: dict) -> None:
         )
 
         eval_window_reward += episode_reward
+        eval_window_episodes += 1
         is_eval_point = (episode + 1) % eval_every == 0
 
         if is_eval_point:
-            # Deterministic best-eval tracking (this window's summed reward).
-            if eval_window_reward > best_eval_reward:
-                best_eval_reward = eval_window_reward
-                best_eval_episode = episode + 1
+            window_mean = eval_window_reward / max(eval_window_episodes, 1)
+            if window_mean > best_window_mean:
+                best_window_mean = window_mean
+                best_window_episode = episode + 1
             if stopper is not None:
                 stopper.update(
                     episode=episode + 1,
-                    reward=eval_window_reward,
+                    reward=window_mean,
                     extra={
                         "makespan": makespan,
                         "energy": energy,
@@ -682,6 +664,7 @@ def _run_one_training(config: dict) -> None:
                     )
                     break
             eval_window_reward = 0.0
+            eval_window_episodes = 0
 
     # If the loop never ran (n_episodes == 0), treat as a 0-length run.
     episodes_trained = episode + 1 if n_episodes > 0 else 0
@@ -751,16 +734,43 @@ def _run_one_training(config: dict) -> None:
 
     wall_clock_s = _time.perf_counter() - wall_start
 
-    # B2 / C2: compute-cost and per-step-normalized reward axes for the Pareto.
+    # B2 / C2 / CSV-01: compute-cost and per-step-normalized reward axes.
     avg_steps = steps_total / max(episodes_trained, 1)
+    # Mean per-episode reward over the best trailing window (NOT a sum).
     best_mean_reward = (
         es_result.best_window_reward
         if es_result is not None and es_result.best_window_reward is not None
-        else best_eval_reward
+        else best_window_mean
     )
-    if not isinstance(best_mean_reward, (int, float)) or best_mean_reward in (float("-inf"), float("inf")):
-        best_mean_reward = 0.0
-    norm_reward = best_mean_reward / max(avg_steps, 1e-6)
+    if not np.isfinite(best_mean_reward):
+        # No evaluation ever happened (n_episodes < eval_every): unknown, not 0.
+        best_mean_reward = float("nan")
+    # Reward per step: same units as one step reward, bounded in [-1, 0].
+    norm_reward = (
+        best_mean_reward / avg_steps
+        if avg_steps > 0 and np.isfinite(best_mean_reward)
+        else float("nan")
+    )
+
+    # LOG-03: the held-out evaluation and the deployment benchmarks were only
+    # persisted to JSON/CSV; surface them in TensorBoard too (x = episode count).
+    metrics.log_eval(
+        episodes_trained,
+        {
+            "mean_reward": eval_metrics["eval_mean_reward"],
+            "norm_reward": eval_metrics["eval_norm_reward"],
+            "makespan": eval_metrics["eval_makespan"],
+            "avg_steps": eval_metrics["eval_avg_steps"],
+        },
+    )
+    metrics.log_perf(
+        episodes_trained,
+        {
+            "latency_mean_ms": latency["mean_ms"],
+            "latency_p95_ms": latency["p95_ms"],
+            "throughput_pps": throughput["samples_per_sec"],
+        },
+    )
 
     # Persist comparable per-combination results.
     precision_name = parse_precision(config["agent"].get("precision", "32"))
@@ -773,12 +783,8 @@ def _run_one_training(config: dict) -> None:
         n_hidden_layers=int(config["agent"].get("n_hidden_layers", 2)),
         episodes_trained=episodes_trained,
         stopped_early=stopped_early,
-        best_episode=es_result.best_episode if es_result is not None else best_eval_episode,
+        best_episode=es_result.best_episode if es_result is not None else best_window_episode,
         best_mean_reward=best_mean_reward,
-        best_eval_reward=(
-            best_eval_reward if best_eval_reward != float("-inf") else 0.0
-        ),
-        best_eval_episode=best_eval_episode,
         latency_mean_ms=latency["mean_ms"],
         latency_p50_ms=latency["p50_ms"],
         latency_p95_ms=latency["p95_ms"],
@@ -794,9 +800,9 @@ def _run_one_training(config: dict) -> None:
         norm_reward=norm_reward,
         eval_episodes=eval_metrics["eval_episodes"],
         eval_mean_reward=eval_metrics["eval_mean_reward"],
+        eval_avg_steps=eval_metrics["eval_avg_steps"],
+        eval_norm_reward=eval_metrics["eval_norm_reward"],
         eval_makespan=eval_metrics["eval_makespan"],
-        eval_sla_violations=eval_metrics["eval_sla_violations"],
-        eval_sla_rate=eval_metrics["eval_sla_rate"],
         wall_clock_s=wall_clock_s,
         device=str(agent.device),
         seed=int(config["experiment"]["seed"]),

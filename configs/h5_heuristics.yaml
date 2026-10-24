@@ -6,13 +6,9 @@ experiment:
     Baseline comparison: four traditional load-balancing heuristics evaluated
     in the SAME CloudSim environment and on the SAME held-out workload as the
     H4 DDQN agent. The heuristics collect the same business metrics (mean
-    reward, makespan, SLA violations/rate, energy, cost) plus their per-decision
+    reward, makespan, energy, cost) plus their per-decision
     latency, so the learned policy can be compared head-to-head with classic
     baselines. Metrics are written to outputs/results/h5_results.csv.
-
-datacenter:
-  n_cloud_hosts: 4
-  n_edge_nodes: 0
 
 py4j:
   host: "java-sim"
@@ -32,10 +28,6 @@ workload:
 # Same number of held-out episodes the H4 agent is evaluated on.
 evaluation:
   n_episodes: 10
-
-queue:
-  urgency_weight: 0.6
-  demand_weight: 0.4
 
 # Reward: energy only (r_t = -energy_delta / E_step_max), computed in
 # d2ql.reward.RewardManager. Heuristics never adapt anything; the comparable

@@ -1,5 +1,6 @@
 import logging
 import random
+
 import numpy as np
 import torch
 import torch.nn as nn
@@ -9,12 +10,12 @@ from d2ql.precision import (
     GRID_PRECISIONS,
     NativeBitLinear,
     compute_dtype,
+    effective_capacity_bits,
+    model_flops,
     packed_size_mb,
     parse_precision,
     precision_bits,
     project_native_parameters,
-    model_flops,
-    effective_capacity_bits,
 )
 
 logger = logging.getLogger(__name__)
@@ -85,7 +86,7 @@ class PrioritizedReplayBuffer:
         self.buffer = []
         self.pos = 0
         self.priorities = np.zeros((capacity,), dtype=np.float32)
-        
+
     def push(self, state, action, reward, next_state, done):
         if self.buffer:
             max_prio = np.nanmax(self.priorities)
@@ -98,10 +99,10 @@ class PrioritizedReplayBuffer:
             self.buffer.append((state, action, reward, next_state, done))
         else:
             self.buffer[self.pos] = (state, action, reward, next_state, done)
-            
+
         self.priorities[self.pos] = max_prio
         self.pos = (self.pos + 1) % self.capacity
-        
+
     def sample(self, batch_size: int, beta: float):
         if len(self.buffer) == self.capacity:
             prios = self.priorities
@@ -195,19 +196,19 @@ class DDQNAgent:
                 "Rebuild python-agent after the CUDA 13 image change. Detail: %s",
                 cuda_error,
             )
-        
+
         # Hyperparameters
         self.gamma = config["agent"]["gamma"] # default 0.98
         self.batch_size = config["agent"]["batch_size"] # default 64
         self.warmup = config["agent"]["replay_buffer_warmup"] # default 2000
         self.grad_clip = config["agent"]["gradient_clip_norm"] # default 10.0
         self.target_update_freq = config["agent"]["target_update_freq"] # default 750
-        
+
         # Epsilon annealing details
         self.epsilon = config["agent"]["epsilon_start"] # starts at 1.0
         self.epsilon_end = config["agent"]["epsilon_end"] # ends at 0.05
         self.epsilon_decay = config["agent"]["epsilon_decay"] # default 0.995 per episode
-        
+
         # PER hyperparams
         self.per_beta_start = config["agent"]["per_beta_start"] # default 0.4
         self.per_beta_end = config["agent"]["per_beta_end"] # default 1.0
@@ -221,7 +222,7 @@ class DDQNAgent:
         if torch.cuda.is_available():
             torch.cuda.manual_seed_all(seed)
 
-        
+
         native_cfg = config.get("native_precision") or {}
         self.precision_name = parse_precision(config["agent"].get("precision", "32"))
         self.bits = precision_bits(self.precision_name)
@@ -280,7 +281,7 @@ class DDQNAgent:
             torch.amp.GradScaler("cuda") if self.amp_dtype == torch.float16 else None
         )
         self.memory = PrioritizedReplayBuffer(
-            config["agent"]["replay_buffer_capacity"], 
+            config["agent"]["replay_buffer_capacity"],
             alpha=config["agent"]["per_alpha"] # default 0.6
         )
 
@@ -466,7 +467,7 @@ class DDQNAgent:
         """Epsilon-greedy action selection."""
         if not evaluate and random.random() < self.epsilon:
             return random.randint(0, self.action_dim - 1)
-            
+
         state_tensor = torch.tensor(state, dtype=self.param_dtype, device=self.device).unsqueeze(0)
         with torch.no_grad():
             q_values = self._cast_fwd(self.online_net, state_tensor)
@@ -483,18 +484,23 @@ class DDQNAgent:
                 return net(x)
         return net(x)
 
-    def train_step(self, episode_idx: int) -> float:
-        """Executes a single DDQN backpropagation update step with PER."""
+    def train_step(self, episode_idx: int) -> tuple[float, float]:
+        """Executes a single DDQN backpropagation update step with PER.
+
+        Returns ``(loss, mean_q)``: the importance-weighted MSE and the mean of
+        ``max_a Q(s, a)`` over the batch, so the caller can log a real Q value
+        instead of a constant.
+        """
         if len(self.memory) < self.warmup:
-            return 0.0 # Wait for buffer warmup transitions
-            
+            return 0.0, 0.0  # Wait for buffer warmup transitions
+
         # Anneal beta from beta_start to beta_end over training episodes
         beta = self.per_beta_start + (self.per_beta_end - self.per_beta_start) * (episode_idx / self.total_episodes)
         beta = min(beta, 1.0)
-        
+
         # Sample mini-batch
         states, actions, rewards, next_states, dones, weights, indices = self.memory.sample(self.batch_size, beta)
-        
+
         # Convert to Tensors at the network's native compute dtype
         states = torch.tensor(states, dtype=self.param_dtype, device=self.device)
         actions = torch.tensor(actions, dtype=torch.long, device=self.device)
@@ -502,11 +508,11 @@ class DDQNAgent:
         next_states = torch.tensor(next_states, dtype=self.param_dtype, device=self.device)
         dones = torch.tensor(dones, dtype=self.param_dtype, device=self.device)
         weights = torch.tensor(weights, dtype=self.param_dtype, device=self.device)
-        
+
         # 1. Compute current Q-values: Q(s_t, a_t; theta)
         q_values = self._cast_fwd(self.online_net, states)
         state_action_values = q_values.gather(1, actions.unsqueeze(1)).squeeze(1)
-        
+
         # 2. Double DQN Target Calculation
         with torch.no_grad():
             # Find best action on next state using Online parameters: argmax_a Q(s_{t+1}, a; theta)
@@ -516,7 +522,7 @@ class DDQNAgent:
             next_state_values = next_q_values.gather(1, next_state_actions.unsqueeze(1)).squeeze(1)
             # Double Q TD Target
             expected_state_action_values = rewards + (self.gamma * next_state_values * (1.0 - dones))
-            
+
         # 3. Compute loss and prioritize experiences
         diff = (state_action_values - expected_state_action_values).float()  # fp32, stable
         td_errors = diff.abs()
@@ -545,14 +551,15 @@ class DDQNAgent:
         # Update priorities in buffer using absolute TD Errors
         new_priorities = td_errors.detach().cpu().numpy() + 1e-6
         self.memory.update_priorities(indices, new_priorities)
-        
+
         self.total_steps += 1
-        
+
         # Hard synchronize networks copy every target_update_freq steps
         if self.total_steps % self.target_update_freq == 0:
             self.update_target_network()
-            
-        return float(loss.float().item())
+
+        mean_q = float(q_values.max(dim=1).values.detach().mean().item())
+        return float(loss.float().item()), mean_q
 
     def decay_epsilon(self) -> None:
         """Anneal the exploration rate at the end of each episode."""
