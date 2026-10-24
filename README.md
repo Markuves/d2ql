@@ -100,19 +100,22 @@ docker compose down
 
 ## Telemetry and Logging
 
-TensorBoard event files (written to `./outputs/tensorboard/<experiment_id>/<timestamp>/`) carry the per-episode series:
+TensorBoard event files are written to `./outputs/tensorboard/<experiment_id>/<timestamp>/` with one monotone x-axis per namespace:
 
-* `episode/total_reward`, `episode/makespan`, `episode/energy`, `episode/cost`, `episode/epsilon`
-* `buffer/size` (replay-buffer occupancy)
-* `train/loss`, `train/mean_q` (per training update)
+* `episode/*` — `total_reward`, `makespan`, `energy`, `dynamic_energy`, `cost`, `epsilon`, `steps`, `reward_per_step`, `energy_per_step`, `avg_loss`, `mean_q`
+* `train/*` — per update on the global step counter: `loss`, `mean_q`, `grad_norm`, `td_error_abs`, `lr`
+* `buffer/size`, `stopper/window_mean`, `stopper/best_window_mean`
+* `eval/*` and `perf/*` — held-out evaluation and deployment benchmarks, once per run
+* `run/es_reason` — why the run stopped (text)
 
-Per-run results are also persisted as JSON (`<checkpoint_dir>/result.json`) and appended to `outputs/results/h4_results.csv` (agent) / `h5_results.csv` (heuristics).
+At the end of every run the event file is also **exported to tidy CSV series** (no downsampling, `nan` preserved, one file per namespace) under `outputs/results/tb_series/<experiment_id>/<timestamp>/`, together with a copy of `result.json`. Re-export older runs with:
 
 ```bash
-tensorboard --logdir=outputs/tensorboard
+docker compose run --rm python-agent python -m d2ql.tb_export \
+  --logdir outputs/tensorboard --outdir outputs/results/tb_series
 ```
 
-Known caveats about the current scalar layout (mixed step axes on `train/*`, `train/mean_q` logged as a constant, misleading `best_mean_reward`/`norm_reward` columns) are tracked in [`docs/backlog.md`](docs/backlog.md).
+Per-run results are persisted as JSON (`<checkpoint_dir>/result.json`) and upserted into `outputs/results/h4_results.csv` (agent) / `h5_results.csv` (heuristics). Open caveats are tracked in [`docs/backlog.md`](docs/backlog.md).
 
 ---
 

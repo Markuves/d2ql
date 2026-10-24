@@ -44,7 +44,8 @@ COST_AXES = [
     ("packed_size_mb", "tamaño empaquetado (MB)"),
     ("latency_mean_ms", "latencia inferencia (ms)"),
 ]
-GROUP_KEYS = ["precision", "device", "hidden_size"]
+GROUP_KEYS = ["precision", "device", "hidden_size", "n_hidden_layers"]
+
 
 
 def _md_table(df: pd.DataFrame, index: bool = False, floatfmt: str = ".4g") -> str:
@@ -159,7 +160,7 @@ def render(df: pd.DataFrame, quality: str) -> str:
     n_seeds = int(df["seed"].nunique()) if "seed" in df.columns else 1
     out(f"# Pareto H4 — calidad (recompensa solo por energía) = `{quality}`\n")
     out(f"- filas: {len(df)} | semillas distintas: {n_seeds} "
-        f"| celdas (precisión×device×ancho): {df.groupby(GROUP_KEYS).ngroups}\n")
+        f"| celdas (precisión×device×ancho×profundidad): {df.groupby(GROUP_KEYS).ngroups}\n")
     if "schema_version" in df.columns:
         versions = sorted(int(v) for v in df["schema_version"].unique())
         out(f"- schema_version: {versions} (2 = obs 11 dims, orden LPT, sin SLA)\n")

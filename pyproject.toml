@@ -84,6 +84,7 @@ kernels = ["triton>=3.0"]
 # =============================================================================
 [project.scripts]
 train = "d2ql.train:main"
+tb-export = "d2ql.tb_export:main"
 
 # =============================================================================
 # [project.urls] — surfaces links on PyPI and in tooling [7][20]

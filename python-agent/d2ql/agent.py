@@ -533,15 +533,16 @@ class DDQNAgent:
                 return net(x)
         return net(x)
 
-    def train_step(self, episode_idx: int) -> tuple[float, float]:
+    def train_step(self, episode_idx: int) -> dict[str, float]:
         """Executes a single DDQN backpropagation update step with PER.
 
-        Returns ``(loss, mean_q)``: the importance-weighted MSE and the mean of
-        ``max_a Q(s, a)`` over the batch, so the caller can log a real Q value
-        instead of a constant.
+        Returns a diagnostics dict with ``loss`` (importance-weighted MSE),
+        ``mean_q`` (mean of ``max_a Q(s, a)`` over the batch), ``grad_norm``
+        (total norm before clipping) and ``td_error_abs`` (mean |TD error|).
+        During replay warm-up nothing is computed and every value is 0.0.
         """
         if len(self.memory) < self.warmup:
-            return 0.0, 0.0  # Wait for buffer warmup transitions
+            return {"loss": 0.0, "mean_q": 0.0, "grad_norm": 0.0, "td_error_abs": 0.0}
 
         # Anneal beta from beta_start to beta_end over training episodes
         beta = self.per_beta_start + (self.per_beta_end - self.per_beta_start) * (episode_idx / self.total_episodes)
@@ -588,7 +589,9 @@ class DDQNAgent:
             loss.backward()
 
         # Apply strict gradient clipping to prevent weight saturation under energy-only reward scale.
-        nn.utils.clip_grad_norm_(self.online_net.parameters(), max_norm=self.grad_clip)
+        grad_norm = float(
+            nn.utils.clip_grad_norm_(self.online_net.parameters(), max_norm=self.grad_clip)
+        )
         if self.scaler is not None:
             self.scaler.step(self.optimizer)
             self.scaler.update()
@@ -608,7 +611,12 @@ class DDQNAgent:
             self.update_target_network()
 
         mean_q = float(q_values.max(dim=1).values.detach().mean().item())
-        return float(loss.float().item()), mean_q
+        return {
+            "loss": float(loss.float().item()),
+            "mean_q": mean_q,
+            "grad_norm": grad_norm,
+            "td_error_abs": float(td_errors.mean().item()),
+        }
 
     def decay_epsilon(self) -> None:
         """Anneal the exploration rate at the end of each episode."""

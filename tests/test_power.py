@@ -46,3 +46,11 @@ def java_source() -> str:
 )
 def test_power_constants_match_the_gateway(java_source, java_name, python_values):
     assert _java_array(java_source, java_name) == pytest.approx(list(python_values))
+
+
+def test_idle_floor_matches_the_host_constants():
+    from d2ql.power import idle_wh_per_step
+
+    # 390 W * 1 s / 3600 = 0.1083 Wh per simulated second
+    assert idle_wh_per_step() == pytest.approx(0.108333, abs=1e-6)
+    assert idle_wh_per_step() < 0.0 + 1.0  # sanity: a positive, bounded value

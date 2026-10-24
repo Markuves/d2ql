@@ -268,6 +268,31 @@ public class SimulationGateway {
         return finished;
     }
 
+    /**
+     * SIM-08: true once every cloudlet of the window has been dispatched AND has
+     * finished executing.
+     *
+     * CloudSimPlus keeps the simulation "running" for a while after the last
+     * cloudlet completes (pending VM/datacenter events), so `isFinished()` only
+     * flips when that queue drains too. The RL episode should end at the
+     * makespan, not after the idle tail: that tail was ~half of the steps and
+     * ~86% of the reported energy.
+     */
+    public boolean isEpisodeComplete() {
+        if (cloudlets.isEmpty()) {
+            return true;
+        }
+        if (currentCloudletIndex < cloudlets.size()) {
+            return false;
+        }
+        for (Cloudlet c : cloudlets) {
+            if (c.getFinishTime() <= 0.0) {
+                return false;
+            }
+        }
+        return true;
+    }
+
     // Package-private accessor for regression tests.
     List<VmSimple> getVms() {
         return vms;
@@ -292,6 +317,25 @@ public class SimulationGateway {
             if (c.getFinishTime() > max) max = c.getFinishTime();
         }
         return max;
+    }
+
+    /** Diagnostic: finish time of every cloudlet of the current episode. */
+    public double[] getCloudletFinishTimes() {
+        double[] times = new double[cloudlets.size()];
+        for (int i = 0; i < cloudlets.size(); i++) {
+            times[i] = cloudlets.get(i).getFinishTime();
+        }
+        return times;
+    }
+
+    /** Diagnostic: is the CloudSimPlus engine still processing events? */
+    public boolean isSimulationRunning() {
+        return simulation != null && simulation.isRunning();
+    }
+
+    /** Diagnostic: cloudlets of the window that have not been dispatched yet. */
+    public int getPendingCloudlets() {
+        return Math.max(0, cloudlets.size() - currentCloudletIndex);
     }
 
     public double getOperationalCost() {

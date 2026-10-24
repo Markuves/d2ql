@@ -31,3 +31,13 @@ STEP_SECONDS = 1.0
 def e_step_max_wh(step_seconds: float = STEP_SECONDS) -> float:
     """Energy (Wh) of one step with every host at ``P_max``: ~0.2694 Wh."""
     return sum(HOST_MAX_WATT) * float(step_seconds) / 3600.0
+
+
+def idle_wh_per_step(step_seconds: float = STEP_SECONDS) -> float:
+    """Idle floor (Wh) of one step: what the datacenter burns with no load.
+
+    ``sum(HOST_IDLE_WATT) = 390 W`` -> 0.1083 Wh per simulated second. Since the
+    reward is energy-only, this constant dominates the episode return (~86 % of
+    it), and subtracting it is what isolates the part the scheduler controls.
+    """
+    return sum(HOST_IDLE_WATT) * float(step_seconds) / 3600.0

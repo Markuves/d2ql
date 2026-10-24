@@ -63,6 +63,9 @@ class FakeSim:
     def isFinished(self):
         return True
 
+    def isEpisodeComplete(self):
+        return True
+
 
 @pytest.fixture
 def stub_env(monkeypatch):

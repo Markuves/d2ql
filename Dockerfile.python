@@ -46,6 +46,12 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
     DEBIAN_FRONTEND=noninteractive
 
+# REPO-09: only the source is copied into the image (no .git), so the commit
+# cannot be resolved at runtime. Bake it at build time:
+#   GIT_SHA=$(git rev-parse --short HEAD) docker compose build python-agent
+ARG GIT_SHA=unknown
+ENV D2QL_GIT_SHA=$GIT_SHA
+
 WORKDIR /app
 
 RUN apt-get update && apt-get install -y --no-install-recommends \

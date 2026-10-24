@@ -169,8 +169,10 @@ def _run_one_heuristic(config: dict, policy_name: str) -> None:
     from d2ql.env import N_HOSTS, CloudSimEnv
     from d2ql.heuristics import build_heuristic
     from d2ql.metrics import MetricsLogger
+    from d2ql.power import idle_wh_per_step
     from d2ql.provenance import provenance
     from d2ql.results import HeuristicResult, save_heuristic_result
+    from d2ql.tb_export import export_run
     from d2ql.workload import AzureTraceLoader
 
     training_cfg = config.get("training") or {}
@@ -226,6 +228,7 @@ def _run_one_heuristic(config: dict, policy_name: str) -> None:
         obs, _ = env.reset(cloudlets=cloudlets)
         policy.reset()
         ep_reward = 0.0
+        step_count = 0
         terminated = False
         truncated = False
         info: dict = {}
@@ -235,6 +238,7 @@ def _run_one_heuristic(config: dict, policy_name: str) -> None:
             decision_times.append((_time.perf_counter() - t0) * 1000.0)
             obs, reward, terminated, truncated, info = env.step(action)
             ep_reward += reward
+            step_count += 1
 
         mk = float(info.get("makespan", 0.0))
         en = float(info.get("energy", 0.0))
@@ -250,6 +254,8 @@ def _run_one_heuristic(config: dict, policy_name: str) -> None:
             energy=en,
             cost=co,
             epsilon=0.0,
+            steps=step_count,
+            dynamic_energy=en - idle_wh_per_step() * step_count,
         )
 
     wall_clock_s = _time.perf_counter() - wall_start
@@ -296,13 +302,27 @@ def _run_one_heuristic(config: dict, policy_name: str) -> None:
             obs_dim=env.observation_space.shape[0],
             dispatch_order="lpt_work_per_pe",
             eval_split="stratified_mi",
+            tb_series_dir=str(
+                Path(results_dir) / "tb_series" / f"{experiment_id}_{policy_name}" / run_stamp
+            ),
         ),
     )
     save_heuristic_result(
         result, checkpoint_dir=str(checkpoint_dir), results_dir=results_dir
     )
 
+    metrics.log_text("run/es_reason", "heuristic evaluation (no training)", n_eval_eps)
     metrics.close()
+    export_run(
+        log_dir,
+        Path(results_dir) / "tb_series" / f"{experiment_id}_{policy_name}" / run_stamp,
+        snapshot=checkpoint_dir / "result.json",
+        extra_meta={
+            "experiment_id": f"{experiment_id}_{policy_name}",
+            "policy": policy_name,
+            "seed": seed,
+        },
+    )
     env.close()
 
 
@@ -460,9 +480,11 @@ def _run_one_training(config: dict) -> None:
     from d2ql.early_stopping import EarlyStopper
     from d2ql.env import CloudSimEnv
     from d2ql.metrics import MetricsLogger
+    from d2ql.power import idle_wh_per_step
     from d2ql.precision import packed_size_mb, parse_precision, precision_bits
     from d2ql.provenance import provenance
     from d2ql.results import RunResult, save_run_result
+    from d2ql.tb_export import export_run
     from d2ql.workload import AzureTraceLoader
 
     checkpoint_dir = Path(config["training"]["checkpoint_dir"])
@@ -575,6 +597,8 @@ def _run_one_training(config: dict) -> None:
         episode_loss = 0.0
         episode_mean_q = 0.0
         step_count = 0
+        update_count = 0
+        grad_norm = 0.0
 
         while not (terminated or truncated):
             action = agent.select_action(obs)
@@ -583,17 +607,28 @@ def _run_one_training(config: dict) -> None:
             done_flag = float(terminated or truncated)
             agent.memory.push(obs, action, reward, next_obs, done_flag)
 
-            loss, mean_q = agent.train_step(episode)
+            steps_before = agent.total_steps
+            diagnostics = agent.train_step(episode)
+            if agent.total_steps > steps_before:
+                update_count += 1
             episode_reward += reward
-            episode_loss += loss
-            episode_mean_q += mean_q
+            episode_loss += diagnostics["loss"]
+            episode_mean_q += diagnostics["mean_q"]
+            grad_norm = diagnostics["grad_norm"]
             step_count += 1
             obs = next_obs
             # LOG-01: a single series on a single x-axis (the global update
             # counter). During buffer warm-up there is no update, so nothing is
             # logged and the axis never goes backwards.
             if agent.total_steps > 0:
-                metrics.log_training(step=agent.total_steps, loss=loss, mean_q=mean_q)
+                metrics.log_training(
+                    step=agent.total_steps,
+                    loss=diagnostics["loss"],
+                    mean_q=diagnostics["mean_q"],
+                    grad_norm=diagnostics["grad_norm"],
+                    td_error_abs=diagnostics["td_error_abs"],
+                    lr=agent.optimizer.param_groups[0]["lr"],
+                )
 
         agent.decay_epsilon()
         steps_total += step_count  # C2
@@ -601,17 +636,24 @@ def _run_one_training(config: dict) -> None:
         makespan = info.get("makespan", 0.0)
         energy = info.get("energy", 0.0)
         cost = info.get("cost", 0.0)
+        # LOG-07: strip the idle floor (390 W * step) so the policy-relevant part
+        # of the energy is visible; ~86 % of the raw energy is that constant.
+        dynamic_energy = energy - idle_wh_per_step() * step_count
 
-        avg_loss = episode_loss / max(step_count, 1)
-        avg_q = episode_mean_q / max(step_count, 1)
+        # LOG-04: average over updates, not over env steps (warm-up adds zeros).
+        avg_loss = episode_loss / max(update_count, 1)
+        avg_q = episode_mean_q / max(update_count, 1)
 
         logger.info(
-            "Episode %d/%d | Reward: %.4f | Avg Loss: %.6f | Mean Q: %.4f | "
-            "Epsilon: %.4f | Cloudlets: %d",
+            "Episode %d/%d | Reward: %.4f | Steps: %d | Updates: %d | Avg Loss: %.6f | "
+            "Mean Q: %.4f | Grad: %.3f | Epsilon: %.4f | Cloudlets: %d",
             episode + 1, n_episodes,
             episode_reward,
+            step_count,
+            update_count,
             avg_loss,
             avg_q,
+            grad_norm,
             agent.epsilon,
             len(cloudlets),
         )
@@ -623,10 +665,12 @@ def _run_one_training(config: dict) -> None:
             energy=energy,
             cost=cost,
             epsilon=agent.epsilon,
+            steps=step_count,
+            dynamic_energy=dynamic_energy,
         )
         # Episode-level diagnostics live under episode/*, never in train/*.
         metrics.log_episode_diagnostics(
-            episode=episode + 1, avg_loss=avg_loss, mean_q=avg_q
+            episode=episode + 1, avg_loss=avg_loss, mean_q=avg_q, updates=update_count
         )
         metrics.log_buffer(
             episode=episode + 1,
@@ -642,6 +686,12 @@ def _run_one_training(config: dict) -> None:
             if window_mean > best_window_mean:
                 best_window_mean = window_mean
                 best_window_episode = episode + 1
+            # LOG-08: the stopper's own metric must be visible in TensorBoard.
+            metrics.log_stopper(
+                episode=episode + 1,
+                window_mean=window_mean,
+                best_window_mean=best_window_mean,
+            )
             if stopper is not None:
                 stopper.update(
                     episode=episode + 1,
@@ -785,6 +835,8 @@ def _run_one_training(config: dict) -> None:
     # Persist comparable per-combination results.
     precision_name = parse_precision(config["agent"].get("precision", "32"))
     params = agent.param_count()
+    # Where the TensorBoard series of this run will be exported (after close()).
+    tb_series_dir = Path(results_dir) / "tb_series" / experiment_id / run_stamp
     result = RunResult(
         experiment_id=experiment_id,
         precision=precision_name,
@@ -826,6 +878,7 @@ def _run_one_training(config: dict) -> None:
             obs_dim=env.observation_space.shape[0],
             dispatch_order="lpt_work_per_pe",
             eval_split="stratified_mi",
+            tb_series_dir=str(tb_series_dir),
         ),
     )
     save_run_result(
@@ -834,7 +887,23 @@ def _run_one_training(config: dict) -> None:
         results_dir=results_dir,
     )
 
+    # LOG-08: the early-stopping reason as a text event (TB + text.csv).
+    metrics.log_text("run/es_reason", es_reason, episodes_trained)
     metrics.close()
+    # Export every scalar to tidy CSV series (no downsampling, full precision).
+    export_run(
+        log_dir,
+        tb_series_dir,
+        snapshot=checkpoint_dir / "result.json",
+        extra_meta={
+            "experiment_id": experiment_id,
+            "seed": int(config["experiment"]["seed"]),
+            "precision": precision_name,
+            "hidden_size": int(config["agent"].get("hidden_size", 256)),
+            "n_hidden_layers": int(config["agent"].get("n_hidden_layers", 2)),
+            "device": str(agent.device),
+        },
+    )
     env.close()
 
 

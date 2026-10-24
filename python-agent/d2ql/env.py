@@ -47,6 +47,7 @@ class CloudSimEnv(gym.Env):
 
         self.gateway = None
         self._prev_energy = 0.0  # cumulative energy of the previous step (A1)
+        self._supports_episode_complete: bool | None = None
         self._connect_gateway()
 
     # ------------------------------------------------------------------
@@ -136,7 +137,9 @@ class CloudSimEnv(gym.Env):
         energy_delta = energy - self._prev_energy
         self._prev_energy = energy
 
-        terminated = bool(self.sim.isFinished())
+        # SIM-08: the episode ends when the last cloudlet finishes, not when the
+        # simulator's event queue drains (that idle tail was ~half the steps).
+        terminated = bool(self._episode_complete())
         truncated = False
 
         info = {
@@ -174,6 +177,26 @@ class CloudSimEnv(gym.Env):
     # ------------------------------------------------------------------
     # Internal helpers
     # ------------------------------------------------------------------
+
+    def _episode_complete(self) -> bool:
+        """SIM-08: all cloudlets dispatched and finished (gateway >= 07f07ccf).
+
+        Falls back to ``isFinished()`` on older gateways, which waits for the
+        simulator event queue to drain and therefore includes the idle tail.
+        """
+        if self._supports_episode_complete is None:
+            try:
+                self.sim.isEpisodeComplete()
+                self._supports_episode_complete = True
+            except Exception:  # noqa: BLE001 - old gateway image
+                self._supports_episode_complete = False
+                logger.warning(
+                    "Gateway has no isEpisodeComplete(); falling back to "
+                    "isFinished() and episodes will include the idle tail (SIM-08)."
+                )
+        if self._supports_episode_complete:
+            return bool(self.sim.isEpisodeComplete())
+        return bool(self.sim.isFinished())
 
     def _parse_obs(self, raw) -> np.ndarray:
         """Convert the Java observation array to the env's float32 vector.
