@@ -1,8 +1,7 @@
-import os
-import sys
 import argparse
 import logging
 import random
+import sys
 from copy import deepcopy
 from datetime import datetime, timezone
 from pathlib import Path
@@ -18,13 +17,12 @@ logger = logging.getLogger(__name__)
 
 DEFAULT_CONFIG = {
     "experiment": {
-        "id": "baseline_random_run",
-        "hypothesis": "H1",
+        "id": "baseline_run",
+        "hypothesis": "none",
         "seed": 42
     },
     "datacenter": {
         "n_cloud_hosts": 4,
-        "n_edge_nodes": 0,
     },
     "agent": {
         "precision": "32",
@@ -51,15 +49,8 @@ DEFAULT_CONFIG = {
         "tensorboard_dir": "outputs/tensorboard",
     },
     "reward": {
-        "target_utilization": 0.70,
-        "migration_penalty": 0.10,
-        "weight_lr": 0.01,
-        "w_perf_floor": 0.2,
-        "w_energy_floor": 0.1,
-        "w_cost_floor": 0.1,
-        "w_perf_init": 0.4,
-        "w_energy_init": 0.3,
-        "w_cost_init": 0.3,
+        # Energy-only reward (r_t = -energy_delta / E_step_max). E_step_max lives
+        # in RewardManager; no adaptive weights are configurable anymore.
     },
     "workload": {
         "trace_path": "data/workload.csv.gz",
@@ -489,16 +480,16 @@ def run_training(config: dict) -> None:
 
 
 def _run_one_training(config: dict) -> None:
-    from d2ql.env import CloudSimEnv
-    from d2ql.agent import DDQNAgent
-    from d2ql.reward import RewardManager
-    from d2ql.metrics import MetricsLogger
-    from d2ql.workload import AzureTraceLoader
-    from d2ql.early_stopping import EarlyStopper
-    from d2ql.results import RunResult, save_run_result
-    from d2ql.precision import packed_size_mb, precision_bits, parse_precision
-
     import time as _time
+
+    from d2ql.agent import DDQNAgent
+    from d2ql.early_stopping import EarlyStopper
+    from d2ql.env import CloudSimEnv
+    from d2ql.metrics import MetricsLogger
+    from d2ql.precision import packed_size_mb, parse_precision, precision_bits
+    from d2ql.results import RunResult, save_run_result
+    from d2ql.reward import RewardManager
+    from d2ql.workload import AzureTraceLoader
 
     checkpoint_dir = Path(config["training"]["checkpoint_dir"])
     checkpoint_dir.mkdir(parents=True, exist_ok=True)

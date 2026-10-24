@@ -20,14 +20,14 @@ py4j:
 
 # Must match the H4 workload settings (episode_length, holdout_frac, time scale,
 # seed) so the heuristics and the agent are evaluated on the identical held-out
-# windows. H4 sets `simulation_time_scale: 0.1`; here the legacy `mi_scale` name
-# carries the same value (it is the alias for the same quantity).
+# windows. H4 sets `simulation_time_scale: 0.01`; using a different value here
+# makes energy/makespan/reward incomparable with the DDQN rows.
 workload:
   trace_path: "data/workload.csv.gz"
   episode_length: 50
   shuffle: false
   holdout_frac: 0.2
-  mi_scale: 0.1
+  simulation_time_scale: 0.01
 
 # Same number of held-out episodes the H4 agent is evaluated on.
 evaluation:
@@ -37,14 +37,9 @@ queue:
   urgency_weight: 0.6
   demand_weight: 0.4
 
-# Fixed, non-adaptive reward weights used to score the heuristics. Kept at the
-# H4 initial weights so the reward is comparable; the weight-independent
-# business metrics (makespan/SLA/energy/cost) stay comparable regardless.
-reward:
-  # Energy-only (Task 2): adaptive weights removed.
-  target_utilization: 0.70
-  migration_penalty: 0.10
-  e_step_max_wh: 0.2694
+# Reward: energy only (r_t = -energy_delta / E_step_max), computed in
+# d2ql.reward.RewardManager. Heuristics never adapt anything; the comparable
+# axis against the DDQN rows is the weight-independent business metrics.
 
 # Traditional load-balancing baselines to sweep (no training).
 heuristics:

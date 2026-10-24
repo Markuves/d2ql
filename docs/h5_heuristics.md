@@ -38,18 +38,20 @@ Las columnas espejan las de `h4_results.csv` (`eval_mean_reward`,
 
 ### Nota sobre el reward
 
-Las heurísticas usan los **pesos de reward iniciales** (fijos, no adaptativos,
-`w_sla=0.4, w_energy=0.3, w_cost=0.3`), mientras el eval de H4 usa los pesos ya
-adaptados por el entrenamiento. Por eso la comparación **más justa** son las
-**métricas de negocio** (makespan/SLA/energía/coste), que son independientes de
-los pesos. El reward también se reporta, pero con esa salvedad.
+El reward es **solo energía** para agentes y heurísticas (`r_t = -ΔE_t / E_step_max`),
+así que no hay pesos que igualar: el valor es directamente comparable mientras
+el escalado de tiempo de simulación coincida. Aun así, la comparación más robusta
+son las **métricas de negocio** (makespan/energía/coste), que no dependen de la
+normalización del reward.
 
 ## Configuración
 
 `configs/h5_heuristics.yaml`. Debe **espejar** los ajustes de H4
-(`episode_length`, `holdout_frac`, `mi_scale`, `seed`, `n_episodes` de
-evaluación) para que las heurísticas y el agente se evalúen sobre las **mismas
-ventanas held-out**.
+(`episode_length`, `holdout_frac`, `simulation_time_scale`, `seed`, `n_episodes`
+de evaluación) para que las heurísticas y el agente se evalúen sobre las **mismas
+ventanas held-out** con la misma duración de cloudlet. Un desajuste de
+`simulation_time_scale` (p. ej. 0.1 vs 0.01) multiplica la energía y el makespan
+por 10 y rompe la comparación.
 
 ## Cómo ejecutar
 

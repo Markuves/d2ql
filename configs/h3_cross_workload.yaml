@@ -45,14 +45,3 @@ training:
   eval_every_n_episodes: 100
   checkpoint_dir: "outputs/checkpoints/h3"
   tensorboard_dir: "outputs/tensorboard"
-
-reward:
-  target_utilization: 0.70
-  migration_penalty: 0.10
-  weight_lr: 0.005          # slower weight adaptation: more stable across varied episodes
-  w_perf_floor: 0.30        # higher SLA floor: deadline compliance is critical under varied load
-  w_energy_floor: 0.10
-  w_cost_floor: 0.10
-  w_perf_init: 0.50         # start with stronger SLA bias for H3
-  w_energy_init: 0.25
-  w_cost_init: 0.25

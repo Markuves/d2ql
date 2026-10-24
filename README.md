@@ -35,15 +35,20 @@ The two environments communicate via a Docker bridge network on port `25333`.
 
 ```
 d2ql/
-├── configs/               # YAML experiment configurations (H1, H2, H3, H4)
+├── configs/               # YAML experiment configurations (H3, H4, H5)
 ├── data/                  # Workspace for preprocessed workload traces
+├── docs/                  # Backlog of improvements + H5 heuristic notes
+├── notebooks/             # EDA + results analysis (parquet snapshots in data/)
 ├── outputs/               # Persistent output directory
-│   ├── checkpoints/       # Saved PyTorch checkpoints (FP32 baseline)
+│   ├── checkpoints/       # Saved PyTorch checkpoints
+│   ├── results/           # Aggregate h4_results.csv / h5_results.csv
 │   └── tensorboard/       # Standalone TensorBoard event logs
 ├── java-sim/              # Java simulation backend code
 │   └── src/               # Gateway server source code
 ├── python-agent/          # RL package code
-│   └── d2ql/              # Core modules (env, agent, reward, quantization, precision)
+│   └── d2ql/              # Core modules (env, agent, reward, precision, results)
+├── scripts/               # Kernel benchmarks and dataset download
+├── tests/                 # pytest suite
 ├── docker-compose.yml     # Multi-container orchestration config
 ├── Dockerfile.java        # Multi-stage Java compile and runtime build
 └── Dockerfile.python      # Python runtime build utilizing uv package manager
@@ -93,20 +98,29 @@ docker compose down
 
 ## Telemetry and Logging
 
-All training metrics, loss data, adaptive reward weight behaviors ($w_{\text{perf}}, w_{\text{energy}}, w_{\text{cost}}$), and baseline evaluations are logged as TensorBoard event files.
+TensorBoard event files (written to `./outputs/tensorboard/<experiment_id>/<timestamp>/`) carry the per-episode series:
 
-These are written to `./outputs/tensorboard/` and can be visualized locally by running:
+* `episode/total_reward`, `episode/makespan`, `episode/energy`, `episode/cost`, `episode/epsilon`
+* `buffer/size` (replay-buffer occupancy)
+* `train/loss`, `train/mean_q` (per training update)
+
+Per-run results are also persisted as JSON (`<checkpoint_dir>/result.json`) and appended to `outputs/results/h4_results.csv` (agent) / `h5_results.csv` (heuristics).
 
 ```bash
 tensorboard --logdir=outputs/tensorboard
 ```
+
+Known caveats about the current scalar layout (mixed step axes on `train/*`, `train/mean_q` logged as a constant, misleading `best_mean_reward`/`norm_reward` columns) are tracked in [`docs/backlog.md`](docs/backlog.md).
 
 ---
 
 ## Research Hypotheses Under Study
 
 This project evaluates the following experimental targets:
-* **H1: Adaptive Reward Weighting:** Tests if a dynamically updating reward weight vector outperforms static weight baselines.
-* **H2: Post-Training Quantization:** Evaluates size and latency optimizations when quantizing PyTorch checkpoints (FP32 to FP16/INT8).
 * **H3: Cross-Workload Generalization:** Evaluates performance degradation when agents are evaluated on scale distributions outside their training scale.
-* **H4: Native Bit-Width Training:** Trains Q-networks from scratch at ternary (1.58-bit), 4, 8, 16, and 32 bits (not PTQ, not QAT), starting from a shared hidden width and scaling capacity only for lower precisions.
+* **H4: Native Bit-Width Training:** Trains Q-networks from scratch at ternary (1.58-bit), 4, 8, 16, 32 bits and bf16 (not PTQ, not QAT), starting from a shared hidden width and scaling capacity only for lower precisions.
+* **H5: Heuristic Baselines:** Compares the learned policy against round-robin, random, least-loaded and least-combined scheduling on the same held-out workload and simulator.
+
+Retired hypotheses:
+* **H1 (adaptive reward weighting)** — superseded when the reward became energy-only (`r_t = -ΔE_t / E_step_max`); the weight vector is gone from both code and configs.
+* **H2 (post-training quantization)** — superseded by H4 native bit-width training; the standalone PTQ module and its config were removed.
