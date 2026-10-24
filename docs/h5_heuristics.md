@@ -38,11 +38,12 @@ Las columnas espejan las de `h4_results.csv` (`eval_mean_reward`,
 
 ### Nota sobre el reward
 
-El reward es **solo energía** para agentes y heurísticas (`r_t = -ΔE_t / E_step_max`),
-así que no hay pesos que igualar: el valor es directamente comparable mientras
-el escalado de tiempo de simulación coincida. Aun así, la comparación más robusta
-son las **métricas de negocio** (makespan/energía/coste), que no dependen de la
-normalización del reward.
+El reward de H6 es **solo por energía** (`r_t = -energy_delta / E_step_max`),
+neutro respecto a SLA y utilización. Las heurísticas usan esta misma fórmula
+(por compatibilidad con `main.py`), sin pesos adaptativos. La comparación
+**más justa** sigue siendo las **métricas de negocio** (makespan/SLA/energía/coste),
+que son independientes del reward. El `eval_mean_reward` se reporta como referencia
+únicamente.
 
 ## Configuración
 

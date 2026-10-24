@@ -532,7 +532,7 @@ class DDQNAgent:
         else:
             loss.backward()
 
-        # Apply strict gradient clipping to prevent weight saturation under multi-objective reward shifts
+        # Apply strict gradient clipping to prevent weight saturation under energy-only reward scale.
         nn.utils.clip_grad_norm_(self.online_net.parameters(), max_norm=self.grad_clip)
         if self.scaler is not None:
             self.scaler.step(self.optimizer)

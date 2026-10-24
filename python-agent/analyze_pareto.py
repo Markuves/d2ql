@@ -1,6 +1,10 @@
 #!/usr/bin/env python
 """Pareto analysis of the H4 precision x capacity sweep (P1).
 
+Nota (post-H6): el `norm_reward` y `eval_mean_reward` son recompensas
+solo por energía (`-energy_delta / E_step_max`), no la fórmula multi-objetivo
+histórica con pesos adaptativos (`w_sla`, `w_energy`, `w_cost`).
+
 Reads the aggregate results CSV produced by ``main.py`` and reports, for a chosen
 quality metric:
 
@@ -143,7 +147,7 @@ def render(df: pd.DataFrame, quality: str) -> str:
     lines: list[str] = []
     out = lines.append
     n_seeds = int(df["seed"].nunique()) if "seed" in df.columns else 1
-    out(f"# Pareto H4 — calidad = `{quality}`\n")
+    out(f"# Pareto H4 — calidad (recompensa solo por energía) = `{quality}`\n")
     out(f"- filas: {len(df)} | semillas distintas: {n_seeds} "
         f"| celdas (precisión×device×ancho): {df.groupby(GROUP_KEYS).ngroups}\n")
 

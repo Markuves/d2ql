@@ -8,6 +8,13 @@ Reemplaza y absorbe los documentos históricos `h4_early_stopping_y_resultados.m
 (eliminados). `h5_heuristics.md` sigue siendo el documento operativo de ese experimento.
 
 > Última revisión: **2026-10-19**. Alcance: `python-agent/`, `java-sim/`, `configs/`, `tests/`, `docs/`.
+>
+> **Fusión con `origin/quant` (commits `284ac2b`, `f74001d`, 2026-10-23).** Esos dos commits ya
+> limpiaban el proyecto hacia el reward energy-only: quitaron `log_weights` y todo el cálculo de
+> `delta_*`/pesos, borraron el bloque `reward` de `DEFAULT_CONFIG`, quitaron los pesos de los configs
+> H1–H5, añadieron notas históricas en `r1`/`r2`/`h5_heuristics` y re-ejecutaron los notebooks.
+> Los ítems afectados quedan marcados como `hecho` citando el commit; lo que seguía abierto se
+> re-verificó sobre el código fusionado (no se asume nada por el mensaje del commit).
 
 ---
 
@@ -49,13 +56,14 @@ docker compose run --rm python-agent python analyze_pareto.py --results outputs/
 
 | Estado | P0 | P1 | P2 | P3 | Total |
 |---|---|---|---|---|---|
-| hecho | 1 | 0 | 2 | 0 | 3 |
-| propuesto | 4 | 8 | 5 | 2 | 19 |
+| hecho | 2 | 0 | 2 | 0 | 4 |
+| propuesto | 3 | 10 | 6 | 3 | 22 |
 | descartado | 1 | 0 | 0 | 0 | 1 |
-| bloqueado | 0 | 0 | 0 | 0 | 0 (4 decisiones abiertas) |
+| bloqueado | 0 | 0 | 0 | 0 | 0 (5 decisiones abiertas) |
 
-Lo urgente antes de volver a publicar cifras: **CSV-01**, **EVAL-01** y **LOG-01**.
-**EVAL-02** ya quedó corregido en esta revisión (H5 estaba 10× desalineado de H4).
+Lo urgente antes de volver a publicar cifras: **CSV-01**, **EVAL-01**, **LOG-01** y **EVAL-05**.
+Quedaron corregidos en la fusión: **EVAL-02** (H5 estaba 10× desalineado), **LOG-02** (pesos
+adaptativos residuales), **REPO-03** (guard del plan) y **REPO-04** (claves de config muertas).
 
 ---
 
@@ -102,16 +110,17 @@ Lo urgente antes de volver a publicar cifras: **CSV-01**, **EVAL-01** y **LOG-01
   y promediarlo por episodio.
 - **Criterio:** x monótona y sin duplicados, un punto por update, `train/mean_q` con varianza > 0.
 
-### LOG-02 · `weights/*` registra constantes de un experimento retirado (H1)
-- **Estado:** propuesto · **P0** (paneles engañosos)
-- **Evidencia:** `main.py:659-663,692-697` calcula deltas y llama `update_weights` (no-op desde el
-  reward energy-only) y `metrics.log_weights` (`metrics.py:44-55`) escribe `w_sla=0, w_energy=1,
-  w_cost=0` en cada episodio.
-- **Impacto:** tres curvas planas que sugieren un mecanismo adaptativo que ya no existe.
-- **Fix:** eliminar `log_weights`, el bloque `delta_perf/delta_energy/delta_cost`,
-  `RewardManager.update_weights` y `get_current_weights` (y su test), o dejarlos con un
-  `logger.debug`.
-- **Criterio:** no quedan tags `weights/*` en un run nuevo.
+### LOG-02 · `weights/*` registraba constantes de un experimento retirado (H1)
+- **Estado:** **hecho** (`284ac2b`, `f74001d`) · **P0**
+- **Evidencia original:** `main.py:659-663,692-697` calculaba deltas y llamaba `update_weights` (no-op
+  desde el reward energy-only), y `metrics.log_weights` escribía `w_sla=0, w_energy=1, w_cost=0` en
+  cada episodio.
+- **Fix aplicado (upstream):** se borró `MetricsLogger.log_weights`, la llamada en el loop y todo el
+  bloque `delta_perf/delta_energy/delta_cost` (con `prev_makespan/energy/cost`); el log de episodio ya
+  no imprime `Weights:`. Verificado por grep sobre el código fusionado: no quedan referencias a
+  `log_weights`, `update_weights` ni `get_current_weights` en `main.py`.
+- **Criterio:** un run nuevo no genera tags `weights/*`. **Residual:** `RewardManager` conserva la API
+  no-op → ver REPO-07.
 
 ### EVAL-02 · H5 evaluaba con un `simulation_time_scale` 10× distinto al de H4
 - **Estado:** **hecho** (2026-10-19) · **P0**
@@ -174,6 +183,19 @@ Lo urgente antes de volver a publicar cifras: **CSV-01**, **EVAL-01** y **LOG-01
   FLOPs distintos) y el frente compara medias de poblaciones mezcladas.
 - **Fix:** incluir `n_hidden_layers` en `GROUP_KEYS`.
 - **Criterio:** nº de celdas = precisiones × devices × anchos × profundidades.
+
+### EVAL-05 · El config pide 3 semillas pero el sweep publicado tiene 2
+- **Estado:** propuesto · **P1** (decidir: correr o revertir)
+- **Evidencia:** tras la fusión, `configs/h4_native_precision.yaml` declara `seeds: [42, 43, 44]`
+  (commit `284ac2b`) y el plan real es **66 celdas × 3 = 198 corridas**. `notebooks/data/data_h4.parquet`
+  y todos los análisis publicados tienen **132 filas = 66 celdas × 2 semillas (41, 42)**: la tercera
+  semilla nunca se ejecutó y la 41 no está en el config.
+- **Impacto:** reproducir el barrido con el config actual no reproduce las cifras publicadas; y
+  cualquier comparación nueva contra el parquet mezcla celdas con 2 y con 3 réplicas.
+- **Fix:** correr la tercera semilla (198 corridas) y regenerar el parquet, o revertir el config a
+  `[42, 41]` para reproducir lo publicado. En ambos casos, test guard, notebook y backlog deben
+  declarar el mismo número.
+- **Criterio:** `filas del parquet == len(plan) × len(seeds)` del config vigente.
 
 ### SIM-02 · `n_cloud_hosts` es configurable en Python y fijo en Java
 - **Estado:** propuesto · **P1**
@@ -239,21 +261,26 @@ Lo urgente antes de volver a publicar cifras: **CSV-01**, **EVAL-01** y **LOG-01
 - **Criterio:** `D2QL_LOWBIT_BACKEND=triton` falla con un mensaje claro si falta la dependencia.
 
 ### REPO-03 · Suite de tests en rojo por un guard obsoleto
-- **Estado:** **hecho** (2026-10-19) · **P2**
-- **Evidencia:** `tests/test_h4_plan.py` afirmaba `seeds == [42, 43, 44]` y 138 corridas; el config
-  real usa `[42, 41]` → 132 (que es lo que contiene el parquet). Antes: `1 failed, 41 passed`.
-- **Fix aplicado:** el guard ahora refleja `[42, 41]` y `132`; `pytest` queda en **42 passed**.
-- **Criterio:** `pytest` verde.
+- **Estado:** **hecho** (2026-10-19, re-hecho tras la fusión) · **P2**
+- **Evidencia:** `tests/test_h4_plan.py` afirmaba `seeds == [42, 43, 44]` y **138** corridas. El config
+  local tenía `[42, 41]` (132 filas en el parquet) y el remoto lo cambió de nuevo a `[42, 43, 44]`
+  (`284ac2b`). Además el guard contaba 4/5 anchos por precisión (46 celdas), cifra de un
+  `hidden_sizes` anterior: con la lista actual son **6/7 anchos → 66 celdas**.
+- **Fix aplicado:** el guard refleja el config fusionado: `seeds == [42, 43, 44]`, `len(plan) == 66`,
+  `66 × 3 = 198` corridas, con nota de que el parquet publicado tiene 132 (ver EVAL-05).
+  `pytest` → **42 passed**.
+- **Criterio:** `pytest` verde y el guard igual al config vigente.
 
 ### REPO-04 · Claves de configuración que nadie lee
-- **Estado:** **parcialmente hecho** (2026-10-19) · **P2**
+- **Estado:** **casi hecho** (2026-10-19 + fusión) · **P2**
 - **Evidencia:** `n_edge_nodes`, `target_utilization`, `migration_penalty`, `weight_lr`, `w_*_floor`,
-  `w_*_init` solo existían en `DEFAULT_CONFIG`/configs; `e_step_max_wh` tampoco se leía. En
+  `w_*_init` solo existían en `DEFAULT_CONFIG`/configs; `e_step_max_wh` tampoco se lee. En
   `docker-compose*.yml`, `DATASET_PATH`, `WORKLOAD_TIME_SCALE`, `WORKLOAD_MIPS`, `WINDOW_DURATION`,
   `MAX_CLOUDLETS_PER_WINDOW` e `INITIAL_WINDOW_START` no los lee ni Java (`GATEWAY_PORT` es lo único)
   ni Python (`JAVA_HOST`/`JAVA_PORT`).
-- **Fix aplicado:** `DEFAULT_CONFIG` y los bloques `reward:` de H3/H4/H5 limpiados; se borraron los
-  configs H1/H2.
+- **Fix aplicado:** `DEFAULT_CONFIG` sin bloque `reward` (local + `284ac2b`); H1/H2 borrados; H3 sin
+  bloque `reward`; en H4/H5 el bloque `reward:` quedó reducido a comentario (la fusión mantenía
+  `e_step_max_wh`, que **nadie lee** — ver SIM-03, por eso no se conservó la clave).
 - **Pendiente:** limpiar las variables de entorno muertas de `docker-compose.yml`/`h5.yml`.
 
 ### REPO-05 · `h4_capacity_plan` es código muerto
@@ -279,6 +306,18 @@ Lo urgente antes de volver a publicar cifras: **CSV-01**, **EVAL-01** y **LOG-01
 - **Fix:** mover `RewardManager` al env (o documentar el contrato); leer el reloj post-step.
 - **Criterio:** `env.step()` devuelve un reward no nulo y `info["sim_time"]` = reloj tras el paso.
 
+### REPO-07 · `RewardManager` conserva una API adaptativa no-op
+- **Estado:** propuesto · **P2**
+- **Evidencia:** `reward.py:32-37` mantiene `update_weights()` (solo hace `append` a
+  `weight_history`) y `get_current_weights()` (devuelve `{0, 1, 0}`), más los argumentos `e_ref` y
+  `v_max` del constructor, ya sin uso tras la fusión; `tests/test_reward.py` sigue testeando ambos.
+- **Impacto:** deja una interfaz que sugiere que los pesos se pueden adaptar (y una lista
+  `weight_history` que crece un elemento por episodio sin que nadie la lea).
+- **Fix:** borrar `update_weights`, `get_current_weights`, `weight_history` y los argumentos muertos;
+  eliminar `test_update_weights_no_op`. Alternativa: mover `get_current_weights` a un helper de
+  reporting si se quiere registrar el peso fijo.
+- **Criterio:** `RewardManager` expone solo `compute_step_reward` y `e_step_max`.
+
 ---
 
 ## 6. P3 — ideas opcionales
@@ -295,6 +334,14 @@ Lo urgente antes de volver a publicar cifras: **CSV-01**, **EVAL-01** y **LOG-01
   que los parámetros crecen con `hidden²` dentro de cada capa oculta.
 - **Fix:** usar las columnas ya persistidas `params`, `flops` o `effective_capacity_bits`.
 - **Criterio:** la métrica de tamaño usada en el análisis es una de las columnas del CSV.
+
+### REPO-08 · `h5_heuristics.md` documenta una columna que no existe
+- **Estado:** propuesto · **P3**
+- **Evidencia:** la lista de métricas de `docs/h5_heuristics.md` incluye `notes`, pero
+  `HeuristicResult` (`results.py:123-146`) no tiene ese campo (sí `extra`).
+- **Fix:** quitar `notes` de la lista o añadir el campo a `HeuristicResult` (el CSV de H4 tampoco
+  tiene `notes`; el parquet lo deriva de `es_reason`).
+- **Criterio:** columnas del doc == columnas de `h5_results.csv`.
 
 ---
 
@@ -319,10 +366,11 @@ Lo urgente antes de volver a publicar cifras: **CSV-01**, **EVAL-01** y **LOG-01
 | E3 presupuesto de cómputo | Early stopping por plateau | `early_stopping.py`, `main.py` | 105/132 corridas pararon por meseta; 27 agotaron el presupuesto |
 | H4 early stopping + resultados | `EarlyStopper` + `result.json` + CSV agregado + benchmark de latencia/throughput | `early_stopping.py`, `results.py`, `agent.py` | 132 filas con latencia, throughput por batch, held-out |
 | H6 reward energía + potencia convexa | `P = idle + (max−idle)·u^γ`, reward `-ΔE/E_step_max` | `java-sim`, `reward.py` | objetivo único, sin pesos que ajustar |
-| H1 retirado | Config H1, pesos adaptativos (`w_*`, floors, `weight_lr`) y sus claves fuera de código y configs | `configs/`, `main.py`, `reward.py` | 2026-10-19: borrado `configs/h1_adaptive_baseline.yaml` |
-| H2 retirado | PTQ (INT8 dinámico/FP16) eliminado: config + módulo standalone con `QNetwork` duplicada y API deprecada | `configs/h2_quantization.yaml`, `d2ql/quantization.py` | 2026-10-19: ambos borrados; H2 quedó superado por H4 |
-| H5 alineado | `simulation_time_scale` igual a H4 | `configs/h5_heuristics.yaml` | 2026-10-19: 0.1 → 0.01 (EVAL-02) |
-| Docs unificados | H4, H6, R1 y R2 absorbidos aquí | `docs/` | quedan `backlog.md` y `h5_heuristics.md` |
+| H1 retirado | Pesos adaptativos (`w_*`, floors, `weight_lr`) fuera de código y configs; config H1 eliminado | `configs/`, `main.py`, `reward.py`, `metrics.py` | `284ac2b` limpió las claves en H1–H5; la fusión mantuvo el borrado de `configs/h1_adaptive_baseline.yaml` |
+| H2 retirado | PTQ (INT8 dinámico/FP16) eliminado: config + módulo standalone con `QNetwork` duplicada y API deprecada | `configs/h2_quantization.yaml`, `d2ql/quantization.py` | 2026-10-19: ambos borrados (la fusión mantuvo el borrado aunque el remoto había editado el config) |
+| H5 alineado | `simulation_time_scale` igual a H4 | `configs/h5_heuristics.yaml` | 2026-10-19: 0.1 → 0.01 (EVAL-02), conservado en la fusión |
+| Docs unificados | H4, H6, R1 y R2 absorbidos aquí | `docs/` | quedan `backlog.md` y `h5_heuristics.md`; las notas históricas que el remoto añadió a R1/R2 se revisaron y su contenido ya está en «Descartado» y en la fila H6 |
+| Fusión `origin/quant` | Merge de `284ac2b` + `f74001d` resuelto a mano | `main.py`, `configs/h3-h5`, `docs/h5_heuristics.md`, notebook | 2026-10-19: conflictos resueltos; `pytest` 42 passed, ruff limpio en lo tocado; incluye `EVAL-05` como hallazgo |
 
 ---
 
@@ -348,3 +396,5 @@ Lo urgente antes de volver a publicar cifras: **CSV-01**, **EVAL-01** y **LOG-01
    las cifras de calidad actuales sirven o hay que re-correr.
 4. **Hardware objetivo del despliegue** (edge/memoria vs servidor/velocidad): decide si el eje de
    comparación es `packed_size_mb` o latencia real, y si tiene sentido PERF-01.
+5. **Semillas del sweep (EVAL-05):** ¿se corre la tercera semilla (198 corridas y se regenera el
+   parquet) o se revierte el config a `[42, 41]` para reproducir las 132 filas publicadas?

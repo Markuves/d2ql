@@ -91,10 +91,11 @@ def test_h4_config_expands_to_expected_plan():
     seeds = _experiment_seeds(cfg)
 
     assert layers == [1, 2]
-    assert seeds == [42, 41]
+    assert seeds == [42, 43, 44]
     # Widths per precision: fp32 (capped at 2048) -> 6 widths; 16/bf16/ternary -> 7.
     # Every width is combined with both depths: 6+7+7+6+7 = 33 widths x 2 depths.
     assert len(plan) == (6 + 7 + 7 + 6 + 7) * 2
-    # 2 seeds x 66 (precision, device, width, depth) combinations = 132 runs,
-    # which is what the published H4 sweep actually contains.
-    assert len(plan) * len(seeds) == 132
+    # 3 seeds x 66 (precision, device, width, depth) combinations = 198 runs.
+    # NOTE: the published sweep in notebooks/data/data_h4.parquet has 132 rows
+    # (66 cells x 2 seeds, 41/42); the third seed has not been run yet.
+    assert len(plan) * len(seeds) == 198
