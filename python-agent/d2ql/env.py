@@ -5,6 +5,7 @@ import numpy as np
 from gymnasium import spaces
 
 from d2ql.queue import PriorityCloudletQueue
+from d2ql.reward import RewardManager
 
 logger = logging.getLogger(__name__)
 
@@ -27,7 +28,7 @@ class CloudSimEnv(gym.Env):
 
     metadata = {"render_modes": []}
 
-    def __init__(self, config: dict):
+    def __init__(self, config: dict, reward_fn=None):
         super().__init__()
         self.config = config
 
@@ -36,6 +37,10 @@ class CloudSimEnv(gym.Env):
         self.observation_space = spaces.Box(
             low=0.0, high=1.0, shape=(OBS_DIM,), dtype=np.float32
         )
+
+        # Reward lives in the env so `step()` honours the Gymnasium contract
+        # (SIM-05): r_t = -energy_delta / E_step_max, in [-1, 0].
+        self.reward_fn = reward_fn if reward_fn is not None else RewardManager()
 
         # Dispatch order (LPT by work-per-PE); rebuilt on every reset.
         self.dispatch_queue = PriorityCloudletQueue()
@@ -137,14 +142,15 @@ class CloudSimEnv(gym.Env):
         info = {
             "cpu_utilizations": cpu_utilizations,
             "energy": energy,              # cumulative (episode totals / logs)
-            "energy_delta": energy_delta,  # per-step increment (reward, A1)
+            "energy_delta": energy_delta,  # per-step increment (SIM-05)
             "makespan": makespan,
             "cost": cost,
             "sim_time": float(self.sim.getSimulationTime()),  # clock AFTER the step
         }
 
-        # Reward is computed externally in main.py via RewardManager
-        reward = 0.0
+        # SIM-05: the env owns the reward (r_t in [-1, 0]); callers just use the
+        # value returned by step(), as Gymnasium expects.
+        reward = self.reward_fn.compute_step_reward(energy_delta)
         return obs, reward, terminated, truncated, info
 
     def render(self):

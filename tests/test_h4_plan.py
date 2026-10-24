@@ -9,7 +9,7 @@ import yaml
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "../python-agent"))
 
-from main import _build_native_plan, _experiment_seeds, _resolve_layer_counts
+from d2ql.train import _build_native_plan, _experiment_seeds, _resolve_layer_counts
 
 # ---------------------------------------------------------------------------
 # n_hidden_layers as an int or a vector

@@ -80,6 +80,9 @@ class RunResult:
     latency_p50_ms: float
     latency_p95_ms: float
     latency_n_samples: int
+    # PERF-03: extra per-decision cost of padding batch=1 to the kernel minimum
+    # (M>16 for torch._int_mm). ~0 on CPU/fp32.
+    padding_overhead_ms: float
     # Batched deploy throughput (samples/sec) — the regime where low-bit helps.
     throughput_pps: float
     throughput_batch_size: int
@@ -128,6 +131,7 @@ class RunResult:
             "latency_p50_ms",
             "latency_p95_ms",
             "latency_n_samples",
+            "padding_overhead_ms",
             "throughput_pps",
             "throughput_batch_size",
             "throughput_by_batch",

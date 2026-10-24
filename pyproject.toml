@@ -73,14 +73,17 @@ dev = [
     # TensorBoard for training visualization
     "tensorboard>=2.17.0",
 ]
+# Experimental low-bit kernels (d2ql/kernels.py). torch ships Triton in the Linux
+# wheels, but it is not a hard dependency of the agent: install this extra to run
+# `D2QL_LOWBIT_BACKEND=triton` and scripts/benchmark_kernels.py.
+kernels = ["triton>=3.0"]
 
 # =============================================================================
 # [project.scripts] — entry points that become CLI commands after install [1][4][23]
 # The value format is "module.path:function" [23]
 # =============================================================================
 [project.scripts]
-train = "main:main"
-build-deps = "scripts.build_deps:main"
+train = "d2ql.train:main"
 
 # =============================================================================
 # [project.urls] — surfaces links on PyPI and in tooling [7][20]

@@ -7,37 +7,45 @@ Reemplaza a los históricos `h4_early_stopping_y_resultados.md`, `h6_energy_rewa
 `r1_recommendations.md` y `r2_decisiones_precision_capacidad.md` (eliminados). `h5_heuristics.md`
 sigue siendo el documento operativo de ese experimento.
 
-> Última revisión: **2026-10-24** (aplicación de CSV-01, CSV-02, CSV-03, EVAL-02, EVAL-05, LOG-01,
-> LOG-02, LOG-03, SIM-02, SIM-03, SIM-04, REPO-06, REPO-07, REPO-08, PERF-01 y retiro del eje SLA).
-> Alcance: `python-agent/`, `java-sim/`, `configs/`, `tests/`, `docs/`, `notebooks/`.
+> Última revisión: **2026-10-24** (segunda tanda: EVAL-01, EVAL-06, CSV-04, REPO-01, REPO-02,
+> REPO-04, REPO-05, SIM-05, PERF-03). Alcance: `python-agent/`, `java-sim/`, `configs/`, `tests/`,
+> `docs/`, `notebooks/`, `docker-compose*.yml`, `pyproject.toml`.
 
 ---
 
 ## 1. Lineamientos
 
-1. **Fuente única.** Toda sugerencia, decisión o deuda vive aquí; no se abren documentos nuevos por
-   sprint. El documento está **ordenado por estado**: propuestos → hechos → descartados.
-2. **ID estable.** `ÁREA-nn`, con áreas `LOG` (TensorBoard), `CSV` (resultados persistidos), `EVAL`
+1. **Fuente única.** Toda sugerencia, decisión o deuda vive aquí; no se abren documentos por sprint.
+   El documento está **ordenado por estado**: propuestos → hechos → descartados → decisiones.
+2. **ID estable.** `ÁREA-nn` con áreas `LOG` (TensorBoard), `CSV` (resultados persistidos), `EVAL`
    (evaluación/comparabilidad), `SIM` (simulador + entorno), `REPO` (reproducibilidad/higiene),
    `PERF` (precisión y kernels). Nunca se reutiliza ni se renombra.
 3. **Estados:** `propuesto` → `en curso` → `hecho` | `descartado` | `bloqueado`.
 4. **Prioridades:** `P0` invalida cifras publicadas; `P1` comparabilidad/reproducibilidad/corrección
    latente; `P2` deuda sin efecto en las cifras; `P3` idea opcional.
 5. **Definición de hecho:** código/config aplicado **y** evidencia reproducible (test, comando con
-   salida, o fila de CSV). Sin evidencia el ítem no se mueve de "propuesto".
+   salida, o fila de CSV). Sin evidencia el ítem no sale de "propuesto".
 6. **Descartar es una decisión:** todo descartado lleva el porqué y el sustituto. Si se retoma, vuelve
    a `propuesto` con el mismo ID.
 7. **Un ítem = un problema.** Si un cambio toca dos problemas, se abren dos ítems y se referencian.
+8. **Procedencia obligatoria.** Toda fila persistida lleva `schema_version` + `git_sha` +
+   `config_sha256`; sin eso no se puede afirmar que dos cifras sean comparables.
 
-### Verificación (comandos usados en esta revisión)
+### Verificación
 
 ```bash
 # tests (el torch del host no importa: falta libnccl)
 docker run --rm -v $PWD:/work -w /work --entrypoint python d2ql-python-agent -m pytest tests/ -o addopts=""
 # lint (--user para no dejar archivos root en el repo)
 docker run --rm --user $(id -u):$(id -g) -v $PWD:/work -w /work --entrypoint ruff d2ql-python-agent check --no-cache .
-# análisis del sweep
-docker compose run --rm python-agent python analyze_pareto.py --results outputs/results/h4_results.csv
+# smoke end-to-end (gateway real + config mínima; ver commit 804c295 para el YAML)
+docker network create d2ql-smoke
+docker run -d --name java-sim --network d2ql-smoke -e GATEWAY_PORT=25333 -v $PWD/data:/app/data d2ql-java-sim:latest
+docker run --rm --network d2ql-smoke --user $(id -u):$(id -g) \
+  -e JAVA_HOST=java-sim -e JAVA_PORT=25333 -e D2QL_GIT_SHA=$(git rev-parse --short HEAD) \
+  -v $PWD/python-agent/main.py:/app/main.py:ro -v $PWD/python-agent/d2ql:/app/d2ql:ro \
+  -v $PWD/configs:/app/configs:ro -v $PWD/data:/app/data:ro -v $PWD/outputs:/app/outputs \
+  d2ql-python-agent python main.py --config configs/<smoke>.yaml
 ```
 
 ---
@@ -46,115 +54,67 @@ docker compose run --rm python-agent python analyze_pareto.py --results outputs/
 
 | Estado | P0 | P1 | P2 | P3 | Total |
 |---|---|---|---|---|---|
-| propuesto | 2 | 2 | 5 | 1 | 10 |
-| hecho | 0 | 0 | 0 | 0 | 16 |
-| descartado | 1 | 1 | 0 | 0 | 2 + 4 decisiones |
-| bloqueado | 0 | 0 | 0 | 0 | 0 |
+| propuesto | 0 | 1 | 4 | 2 | 7 |
+| hecho | 0 | 0 | 0 | 0 | 29 |
+| descartado | 1 | 1 | 0 | 0 | 2 + 5 históricos |
+| bloqueado | 0 | 0 | 0 | 0 | 0 (4 decisiones abiertas) |
 
-Lo que bloquea volver a publicar cifras: **EVAL-01** (hold-out 10.7× más ligero) y **EVAL-06**
-(el código actual ya no reproduce el parquet: observación 12→11, orden traza→LPT, semillas 3→2 y SLA
-fuera del CSV).
+Ya no queda ningún P0 abierto: EVAL-01 (hold-out) y EVAL-06 (procedencia/esquema) están resueltos.
+Lo que falta para publicar cifras nuevas es **re-correr el sweep** con este código (decisión 1).
 
 ---
 
 ## 3. PROPUESTOS
-
-### P0 — invalidan cifras publicadas
-
-#### EVAL-01 · El hold-out cronológico es 10.7× más ligero que el entrenamiento
-- **Estado:** propuesto · **P0**
-- **Evidencia:** `workload.py:109-120` reserva el 20 % final de ventanas. Con `episode_length=50`:
-  **train 40 817 ventanas, MI medio 270** (p95 1685); **test 10 204 ventanas, MI medio 25** (p95 129)
-  → ratio **10.7×**. Coincide con los datos: `eval_makespan` ≈ 0.59 s frente a episodios de
-  entrenamiento de ~166 pasos.
-- **Impacto:** `eval_*` mide otra carga, así que no es comparable con ninguna métrica de
-  entrenamiento y no sirve como estimación del régimen entrenado.
-- **Fix propuesto:** hold-out **estratificado por MI** (o k-fold con la misma distribución) para la
-  métrica de calidad; conservar el corte temporal como test de generalización aparte.
-- **Criterio:** `|MI_train − MI_eval| / MI_train < 10 %` y `eval_makespan` del mismo orden que el de
-  entrenamiento.
-
-#### EVAL-06 · El código actual no reproduce el sweep publicado (132 filas)
-- **Estado:** propuesto · **P0**
-- **Evidencia:** las 132 filas de `notebooks/data/data_h4.parquet` se generaron con: observación de
-  **12 dims** (incluida `time_to_deadline`), despacho en **orden del trace**, **2 semillas** (41, 42) y
-  columnas `eval_sla_*`. El código fusionado ahora usa **11 dims** (SIM-01), **orden LPT** (SIM-04),
-  el config pide `[42, 41]` (EVAL-05) y el CSV ya no tiene SLA. Cambiar el espacio de observación
-  además invalida los checkpoints previos (`agent.load` falla por `state_dim`).
-- **Impacto:** cualquier cifra nueva no es comparable con las publicadas; el parquet actual describe
-  otro entorno.
-- **Fix propuesto:** decidir si se re-corre el sweep (66 celdas × 2 semillas) y se regenera
-  `data_h4.parquet`, o si se conserva el parquet como "resultados v1" etiquetado con su configuración.
-- **Criterio:** el parquet declara en su metadata/`extra` la versión de código y coincide con
-  `len(plan) × len(seeds)`.
 
 ### P1 — comparabilidad / reproducibilidad
 
 #### EVAL-04 · `analyze_pareto.py` agrega sin la profundidad
 - **Estado:** propuesto · **P1**
 - **Evidencia:** `analyze_pareto.py:47` → `GROUP_KEYS = ["precision","device","hidden_size"]`, pero el
-  sweep barre `n_hidden_layers: [1, 2]`. Cada "celda" promedia modelos de 1 y 2 capas (capacidad y
+  sweep barre `n_hidden_layers: [1, 2]`; cada "celda" promedia modelos de 1 y 2 capas (capacidad y
   FLOPs distintos).
 - **Fix:** incluir `n_hidden_layers` en `GROUP_KEYS`.
 - **Criterio:** nº de celdas = precisiones × devices × anchos × profundidades.
 
-#### CSV-04 · No queda registrada la procedencia de cada corrida
-- **Estado:** propuesto · **P1**
-- **Evidencia:** `RunResult.extra` guarda `eval_every`, `n_episodes_budget`, `es_reason` y
-  `simulation_time_scale`; no hay commit, ni hash del config, ni fecha de corrida. Dos filas con el
-  mismo `experiment_id` pueden venir de código distinto (justo lo que pasó entre `c4063eb` y esta
-  revisión).
-- **Fix:** añadir `git_sha`, `config_sha256` y `run_timestamp` a `extra`.
-- **Criterio:** una fila del CSV se puede reproducir sabiendo commit + config.
-
 ### P2 — deuda
-
-#### REPO-01 · Entry points del paquete rotos
-- **Estado:** propuesto · **P2**
-- **Evidencia:** `pyproject.toml` → `train = "main:main"` (el wheel solo empaqueta `python-agent/d2ql`;
-  `main` no queda instalado) y `build-deps = "scripts.build_deps:main"` (ese módulo no existe).
-- **Fix:** borrar `build-deps`; mover el orquestador a `d2ql.cli:main` o ajustar el wheel.
-
-#### REPO-02 · `triton` se importa pero no se declara
-- **Estado:** propuesto · **P2**
-- **Evidencia:** `kernels.py:27` importa `triton` en el top-level; no está en `dependencies` ni en un
-  extra, y el `try/except` de `precision.py` convierte el fallo en un *fallback* silencioso.
-- **Fix:** extra opcional `triton` o import perezoso dentro de `lowbit_matmul_triton`.
-
-#### REPO-04 · Variables de entorno muertas en `docker-compose*.yml`
-- **Estado:** propuesto · **P2** (la parte de configs ya está hecha)
-- **Evidencia:** `DATASET_PATH`, `WORKLOAD_TIME_SCALE`, `WORKLOAD_MIPS`, `WINDOW_DURATION`,
-  `MAX_CLOUDLETS_PER_WINDOW`, `INITIAL_WINDOW_START` no los lee Java (`GATEWAY_PORT` es lo único) ni
-  Python (`JAVA_HOST`/`JAVA_PORT`).
-- **Fix:** borrarlas de `docker-compose.yml` y `docker-compose.h5.yml`.
-
-#### REPO-05 · `h4_capacity_plan` es código muerto
-- **Estado:** propuesto · **P2**
-- **Evidencia:** `precision.py:354-368` no tiene llamadores; el plan lo construye
-  `main._build_native_plan`.
-
-#### SIM-05 · `env.step()` sigue devolviendo reward 0.0
-- **Estado:** propuesto (parcial) · **P2**
-- **Evidencia:** `env.py:147` (`reward = 0.0`; el cálculo vive en `main.py`). El reloj ya se lee
-  **después** del paso (`info["sim_time"]`, corregido en esta revisión).
-- **Fix:** mover `RewardManager` al env o documentar el contrato en la docstring del módulo.
 
 #### SIM-06 · El gateway todavía calcula el SLA y emite la 12.ª dimensión
 - **Estado:** propuesto · **P2** (requiere reconstruir `java-sim`)
 - **Evidencia:** `SimulationGateway.updateEnergyAndSla` mantiene `slaViolationCount` y
-  `countedSlaCloudlets`, y `buildObservation()` sigue devolviendo
-  `N_HOSTS*2 + 1 + 3` con `time_to_deadline` constante. Python ya ignora el contador y recorta a 11
-  dims (`env._parse_obs`), pero el trabajo muerto sigue en Java y el cliente paga el valor extra.
-- **Fix:** al reconstruir la imagen, borrar el contador SLA y emitir 11 dims; ajustar
-  `SimulationGatewayRegressionTest` (hoy compara `getSlaViolationCount`).
+  `countedSlaCloudlets`; `buildObservation()` sigue devolviendo `N_HOSTS*2 + 1 + 3` con
+  `time_to_deadline` constante; y `addWorkloadRow(submitted, deadline, mi, pes)` sigue arrastrando un
+  `deadline` que ya nadie usa (el SLA se retiró y la cola ordena por trabajo/PE). Python ignora el
+  contador y recorta a 11 dims (`env._parse_obs`), pero el trabajo muerto sigue en el JVM.
+- **Fix:** al reconstruir la imagen, borrar el contador SLA, emitir 11 dims y quitar `deadline` del
+  protocolo/records; ajustar `SimulationGatewayRegressionTest` (hoy compara `getSlaViolationCount`).
 - **Criterio:** la observación del gateway mide `OBS_DIM` y no existe `getSlaViolationCount`.
 
-#### PERF-03 · La latencia de despliegue mide el padding del kernel, no solo el cómputo
+#### EVAL-07 · El split temporal existe pero nadie lo mide
 - **Estado:** propuesto · **P2**
-- **Evidencia:** `precision._int8_binary_matmul` rellena `M` a 17 filas (exigencia de `torch._int_mm`)
-  en cada forward de batch=1; `benchmark_inference` mide ese camino completo.
-- **Fix:** reportar por separado latencia con y sin padding (p. ej. backend Triton sin padding) o
-  descontar el padding explícitamente en el análisis.
+- **Evidencia:** `workload.temporal_episodes()` conserva la cola cronológica como test de
+  generalización temporal, pero ningún camino de `main.py` lo llama ni lo persiste.
+- **Fix:** exponer `evaluation.split: stratified|temporal` en el config y, si se pide, persistir
+  `eval_temporal_mean_reward`/`eval_temporal_makespan` como columnas aparte (nunca mezcladas con las
+  del split estratificado).
+- **Criterio:** un run con `split: temporal` escribe sus propias columnas y no sobrescribe las del
+  split estratificado.
+
+#### REPO-09 · `git_sha` es `"unknown"` dentro del contenedor
+- **Estado:** propuesto · **P2**
+- **Evidencia:** `Dockerfile.python` copia `main.py` y `d2ql/` pero no `.git`, así que
+  `provenance.git_sha()` no puede ejecutar `git rev-parse`; en el smoke solo apareció
+  `smoke123` porque se inyectó `D2QL_GIT_SHA` a mano.
+- **Fix:** `ARG GIT_SHA` en el `Dockerfile.python` + `ENV D2QL_GIT_SHA=$GIT_SHA`, y en compose
+  `build.args.GIT_SHA: ${GIT_SHA:-unknown}`.
+- **Criterio:** un run dentro de `docker compose` escribe un SHA real sin variables manuales.
+
+#### PERF-04 · El eval estratificado encarece la evaluación
+- **Estado:** propuesto · **P2**
+- **Evidencia:** el split anterior (cola cronológica) tenía MI medio 25; el estratificado, 221
+  (EVAL-01). Cada episodio de evaluación tiene por tanto ~10× más trabajo y el eval de las 66 celdas ×
+  2 semillas pasa a ser una fracción no trivial del coste del sweep.
+- **Fix:** medir el tiempo de `_run_heldout_eval` y, si pesa, bajar `evaluation.n_episodes`
+  (10 → 5) manteniendo la cobertura, o cachear las ventanas de evaluación por corrida.
 
 ### P3 — opcional
 
@@ -164,32 +124,47 @@ fuera del CSV).
   que los parámetros crecen con `hidden²` dentro de cada capa oculta.
 - **Fix:** usar las columnas persistidas `params`, `flops` o `effective_capacity_bits`.
 
+#### REPO-10 · `analyze_pareto.py` no es instalable como comando
+- **Estado:** propuesto · **P3**
+- **Evidencia:** vive en `python-agent/` (fuera del paquete), así que no hay entry point y hay que
+  invocarlo con `python analyze_pareto.py` desde ese directorio.
+- **Fix:** moverlo a `d2ql/pareto.py` y añadir `pareto = "d2ql.pareto:main"` en `[project.scripts]`.
+
 ---
 
 ## 4. HECHOS
 
 | Ítem | Qué se hizo | Dónde | Evidencia |
 |---|---|---|---|
-| **CSV-01** reward normalizado | `best_mean_reward` es ahora la **media por episodio** de la mejor ventana (antes era la suma de 50); `norm_reward = best_mean_reward / avg_steps ∈ [-1,0]`; se añaden `eval_avg_steps` y `eval_norm_reward`; se eliminan `best_eval_reward`/`best_eval_episode` (duplicados) | `main.py`, `results.py` | smoke: `best_mean_reward=-9.29`, `avg_steps=20.25` → `norm_reward=-0.4588`; `eval_norm_reward=-0.4512` |
-| **CSV-02** upsert | El CSV se lee, se reemplaza la fila con la misma `(experiment_id, seed)` y se reescribe (antes: `append` puro) | `results.py` | `tests/test_results.py` (3 tests) + smoke re-ejecutado dos veces → sigue habiendo **1** fila |
-| **CSV-03** sin evaluación | `best_mean_reward`/`norm_reward` son `NaN` si el run nunca llegó a un punto de evaluación (antes `0.0`, que se leía como "mejor que −4597") | `main.py` | smoke con `n_episodes=1 < eval_every=5` → `NaN` en el CSV |
-| **LOG-01** eje de `train/*` | Una sola serie en `train/loss` y `train/mean_q`, con x = `agent.total_steps` global; `mean_q` real (media de `max_a Q`) devuelta por `train_step`; el promedio por episodio vive en `episode/avg_loss` y `episode/mean_q` | `agent.py`, `metrics.py`, `main.py` | `EventAccumulator`: `train/loss` n=62 con pasos 1…62 monótonos y únicos; `train/mean_q` con varianza; `episode/mean_q` aparte |
-| **LOG-02** pesos adaptativos | Eliminados `log_weights`, el bloque `delta_*`/`prev_*` y la API no-op del reward (upstream `284ac2b`/`f74001d` + esta revisión) | `metrics.py`, `main.py`, `reward.py` | no existen tags `weights/*` ni `update_weights`/`get_current_weights` |
-| **LOG-03** telemetría de eval y despliegue | Al cerrar el run se registran `eval/mean_reward`, `eval/norm_reward`, `eval/makespan`, `eval/avg_steps` y `perf/latency_*`, `perf/throughput_pps`; se quitó `run/started` | `metrics.py`, `main.py` | `EventAccumulator` lista los 7 tags nuevos |
-| **EVAL-02** H5 vs H4 | H5 pasa de `mi_scale: 0.1` a `simulation_time_scale: 0.01`, igual que H4 | `configs/h5_heuristics.yaml`, `docs/h5_heuristics.md` | ambos configs con el mismo valor; smoke H5 corre con esa escala |
-| **EVAL-05** semillas | `experiment.seeds: [42, 41]` → 66 celdas × 2 = **132** corridas (3 semillas costaban +66 corridas) | `configs/h4_native_precision.yaml`, `tests/test_h4_plan.py` | guard del test en verde con 132 |
-| **SIM-02** nº de hosts | `n_cloud_hosts` desaparece: `env.N_HOSTS = 4` y la topología queda fija como en el gateway; se quitó `datacenter` de `DEFAULT_CONFIG` y de H3/H4/H5 | `env.py`, `main.py`, configs | `tests/test_env_order.py::test_observation_drops_the_constant_deadline_feature` |
-| **SIM-03** fuente única de potencia | Nuevo `d2ql/power.py` con el modelo (`idle`, `max`, `gamma`, precio, `e_step_max_wh`); `RewardManager` lo usa y ya no acepta argumentos muertos; `e_step_max` es inyectable | `power.py`, `reward.py` | `tests/test_power.py` compara los 4 arrays con `SimulationGateway.java`; `test_reward.py` verifica 0.2694 Wh |
-| **SIM-04** el orden se aplica | La cola ahora **ordena de verdad**: LPT por trabajo por PE (`mi/num_pes`) y `env.reset` envía la ventana al gateway en ese orden (antes se calculaba y se ignoraba). Se eliminaron las claves `queue.*` | `queue.py`, `env.py`, configs | `tests/test_queue.py` (4) + `tests/test_env_order.py` (el stub registra el orden LPT de `addWorkloadRow`) |
-| **SLA retirado** | Fuera del CSV/JSON/TB/docs: `eval_sla_violations`, `eval_sla_rate`, `info["sla_violations"]` y los argumentos `sla_*`/`cpu_*` del reward; notebooks y `analyze_pareto.py` sin esas columnas | `results.py`, `main.py`, `env.py`, `reward.py`, `analyze_pareto.py`, docs, notebooks | `tests/test_results.py` verifica que ninguna columna contiene "sla"; CSV del smoke con 31 columnas, ninguna SLA |
-| **REPO-06** lint | `ruff --fix` sobre el repo + `NOQA` documentado en el alias `F` de PyTorch | `python-agent/`, `tests/` | `ruff check --no-cache .` → *All checks passed!* |
-| **REPO-07** API no-op del reward | `RewardManager` expone solo `compute_step_reward` y `e_step_max` | `reward.py` | `tests/test_reward.py` (6 tests) |
-| **REPO-08** doc de H5 | `h5_heuristics.md` ya no lista la columna inexistente `notes` ni métricas SLA | `docs/h5_heuristics.md` | columnas del doc = columnas de `h5_results.csv` |
-| **PERF-01** eje de batch | `throughput_batch_sizes: [1, 8, 32, 128, 256, 512, 1024]` en H4 | `configs/h4_native_precision.yaml` | el CSV guarda la curva completa por corrida (smoke con `[1, 8]`) |
-| **SIM-07** el gateway se apagaba al cerrar el env | `CloudSimEnv.close()` llamaba `JavaGateway.shutdown()`, que **mata el servidor**; la siguiente corrida fallaba con socket muerto. Ahora usa `gateway.close()` (solo el canal cliente) | `env.py` | tras 3 corridas seguidas el contenedor `java-sim` seguía `Up` |
-| **REPO-03** guard del plan | El test del plan H4 se alinea con el config vigente (66 celdas × 2 semillas) | `tests/test_h4_plan.py` | 60 tests en verde |
-| **H1/H2 retirados** | Configs H1/H2 y `d2ql/quantization.py` eliminados (la fusión con `284ac2b` los había limpiado pero no borrado) | `configs/`, `d2ql/` | `grep -r quantization` sin resultados de código |
-| **Docs unificados** | H4, H6, R1 y R2 absorbidos aquí y eliminados | `docs/` | quedan `backlog.md` y `h5_heuristics.md` |
+| **EVAL-01** hold-out estratificado | El split de calidad pasa de "cola cronológica" (MI 10.7× menor) a una muestra sistemática sobre el orden por MI, con offset de medio bloque para no sesgar a la ventana más ligera; la cola temporal queda accesible vía `temporal_episodes()` | `workload.py` | log real: **MI medio train 221.4 vs eval 221.1 (0.14 %)**; `tests/test_holdout.py` (5 tests: ratio < 10 %, tamaños, disjunción, cola temporal) |
+| **EVAL-06** esquema/procedencia | Cada fila lleva `schema_version` y se documenta que los parquet actuales son **v1** (12 dims, orden traza, SLA, suma de ventana) e incompatibles con el código actual; `analyze_pareto` etiqueta las filas por versión y avisa si hay mezcla | `provenance.py`, `analyze_pareto.py`, `notebooks/data/README.md` | smoke: `extra` con `schema_version: 2`; el análisis imprime `schema_version: [2]` o el aviso |
+| **CSV-04** procedencia por corrida | `extra` incluye `git_sha`, `config_sha256` (hash del config efectivo), `run_timestamp_utc`, `obs_dim`, `dispatch_order`, `eval_split` | `provenance.py`, `main.py` | `tests/test_provenance.py` (5) + fila del smoke con `git_sha=smoke123`, `config_sha256=355f0725ddf33037`, `obs_dim=11` |
+| **REPO-01** entry points | `train = "d2ql.train:main"`, borrado `build-deps` (módulo inexistente); el orquestador se movió a `d2ql/train.py` y `python-agent/main.py` queda como shim compatible | `pyproject.toml`, `d2ql/train.py`, `main.py` | `importlib.import_module("d2ql.train")` OK; `python main.py --config ...` corre el smoke |
+| **REPO-02** Triton opcional | Extra `kernels = ["triton>=3.0"]`; el fallback ya no es silencioso: avisa con la instrucción de instalación | `pyproject.toml`, `precision.py` | `tomllib` lista los extras `['dev', 'kernels']`; ruff limpio |
+| **REPO-04** env muertas | Borradas `DATASET_PATH`, `WORKLOAD_TIME_SCALE`, `WORKLOAD_MIPS`, `WINDOW_DURATION`, `MAX_CLOUDLETS_PER_WINDOW`, `INITIAL_WINDOW_START` (6 líneas) | `docker-compose.yml` | `docker compose config` válido para el compose base y el override H5; grep sin resultados |
+| **REPO-05** código muerto | Eliminada `h4_capacity_plan` (sin llamadores; el plan lo arma `_build_native_plan`) | `precision.py` | `grep -r h4_capacity_plan` solo encuentra el `.pyc` viejo |
+| **SIM-05** reward en el env | `CloudSimEnv` construye su propio `RewardManager` y `step()` devuelve `r_t ∈ [-1,0]`; `main.py` ya no calcula la recompensa (usa la devuelta) | `env.py`, `train.py` | `tests/test_env_order.py`: delta 0 → 0.0; delta = `E_step_max` → −1.0 |
+| **PERF-03** coste del padding | Nuevo `benchmark_padding_overhead()` (batch=1 vs lote de 17 sin padding) + columna `padding_overhead_ms` y tag `perf/padding_overhead_ms` | `agent.py`, `results.py`, `train.py`, `metrics.py` | smoke CPU: `padding_overhead_ms=0.0195`; TB lista `perf/padding_overhead_ms` |
+| **CSV-01** reward normalizado | `best_mean_reward` = media por episodio de la mejor ventana; `norm_reward` por paso en [-1,0]; nuevas `eval_avg_steps`/`eval_norm_reward`; fuera `best_eval_*` | `train.py`, `results.py` | smoke: `best_mean_reward=-9.29`, `avg_steps=20.25` → `norm_reward=-0.4588` |
+| **CSV-02** upsert | El CSV se reescribe reemplazando la fila con la misma `(experiment_id, seed)` | `results.py` | `tests/test_results.py`; smoke re-ejecutado → 1 fila |
+| **CSV-03** sin evaluación | `NaN` en vez de `0.0` cuando el run no llegó a evaluar | `train.py` | smoke `n_episodes=1 < eval_every=5` → `NaN` |
+| **LOG-01** eje de `train/*` | Una serie por tag, x = `agent.total_steps`; `mean_q` real; promedios por episodio en `episode/avg_loss` y `episode/mean_q` | `agent.py`, `metrics.py` | TB: `train/loss` 62 puntos con pasos 1…62 únicos y monótonos |
+| **LOG-02** pesos adaptativos | Fuera `log_weights`, `delta_*` y la API no-op del reward (upstream + esta revisión) | `metrics.py`, `train.py`, `reward.py` | sin tags `weights/*` |
+| **LOG-03** telemetría de eval/despliegue | `eval/*` y `perf/*` al cerrar el run; sin `run/started` | `metrics.py` | TB del smoke lista 4 tags `eval/*` y 4 `perf/*` |
+| **EVAL-02** H5 vs H4 | `simulation_time_scale: 0.01` en H5 | `configs/h5_heuristics.yaml` | smoke H5 corre con esa escala |
+| **EVAL-05** semillas | `[42, 41]` → 132 corridas | `configs/h4_native_precision.yaml`, `tests/test_h4_plan.py` | guard en verde |
+| **SIM-02** topología fija | `N_HOSTS = 4` en `env.py`; fuera `n_cloud_hosts` de configs y `DEFAULT_CONFIG` | `env.py`, `train.py`, configs | `tests/test_env_order.py` |
+| **SIM-03** fuente única de potencia | `d2ql/power.py` + `RewardManager` que solo recibe `e_step_max` | `power.py`, `reward.py` | `tests/test_power.py` compara los 4 arrays con el Java |
+| **SIM-04** orden aplicado | LPT por trabajo/PE y envío al gateway en ese orden | `queue.py`, `env.py` | `tests/test_queue.py` + `tests/test_env_order.py` |
+| **SLA retirado** | Fuera del CSV/JSON/TB/docs/notebooks/reward | `results.py`, `env.py`, `reward.py`, `analyze_pareto.py`, docs | `tests/test_results.py`; CSV del smoke con 32 columnas sin SLA |
+| **SIM-07** el gateway se apagaba | `close()` usa `gateway.close()` (solo canal cliente) en vez de `shutdown()` | `env.py` | 3 corridas seguidas con el contenedor `Up` |
+| **REPO-06** lint | `ruff --fix` + excepciones documentadas | repo | `ruff check` → *All checks passed!* |
+| **REPO-07** API no-op del reward | `RewardManager` expone solo `compute_step_reward` y `e_step_max` | `reward.py` | `tests/test_reward.py` |
+| **REPO-08** doc de H5 | Sin columna `notes` ni métricas SLA | `docs/h5_heuristics.md` | columnas del doc = CSV |
+| **PERF-01** eje de batch | `[1, 8, 32, 128, 256, 512, 1024]` | `configs/h4_native_precision.yaml` | curva guardada en `throughput_by_batch` |
+| **REPO-03** guard del plan | Test alineado al config (66 × 2 = 132) | `tests/test_h4_plan.py` | 72 tests en verde |
+| **H1/H2 retirados** | Configs y `d2ql/quantization.py` eliminados | `configs/`, `d2ql/` | sin referencias de código |
+| **Docs unificados** | H4, H6, R1 y R2 absorbidos aquí | `docs/` | quedan `backlog.md` y `h5_heuristics.md` |
 
 ---
 
@@ -197,24 +172,23 @@ fuera del CSV).
 
 | Ítem | Porqué | Sustituto |
 |---|---|---|
-| **SIM-01** SLA como eje | El deadline del trace es un timestamp absoluto (~1e6 s) frente a un reloj de ~170 s: `finish > deadline` nunca se cumple y el contador daba **0 en 132/132 filas**. Además la feature `time_to_deadline` era constante 1.0 | eje energía/tamaño/latencia; métrica eliminada del CSV |
-| **EVAL-03** SLA contado en el último episodio | Deja de existir el contador: el SLA se retiró del proyecto (SIM-01) | — |
-| Migración real de cloudlets | CloudSimPlus no la expone de forma simple y no aporta al objetivo energético actual | scheduling de colocación (nombre honesto en docs) |
-| int8 como precisión estudiada | Sin VNNI en Zen 3 un GEMM int8 solo se emula: siempre más lento que fp32 | ternario (kernel bit-packed) en CPU |
-| Triton como backend por defecto | Triton 3.2 corrompe `tl.dot` int8 con magnitudes ±127 | `int_mm` por defecto, Triton opt-in |
-| PTQ (H2) | No captura el objetivo (entrenar desde cero a baja precisión) | H4 (entrenamiento nativo) |
-| bf16 en CPU | Zen 3 sin AVX512-BF16 → emulación: artefacto del hardware | bf16 solo en GPU |
+| **SIM-01** SLA como eje | Deadline absoluto (~1e6 s) contra un reloj de ~170 s: el contador daba 0 en 132/132 filas | energía/tamaño/latencia; métrica eliminada del CSV |
+| **EVAL-03** SLA del último episodio | El contador ya no existe | — |
+| Migración real de cloudlets | CloudSimPlus no la expone de forma simple y no aporta al objetivo energético | scheduling de colocación |
+| int8 como precisión estudiada | Sin VNNI en Zen 3, un GEMM int8 solo se emula | ternario bit-packed en CPU |
+| Triton como backend por defecto | Triton 3.2 corrompe `tl.dot` int8 con ±127 | `int_mm` por defecto, Triton opt-in |
+| PTQ (H2) | No captura "entrenar desde cero a baja precisión" | H4 (entrenamiento nativo) |
+| bf16 en CPU | Zen 3 sin AVX512-BF16 → emulación | bf16 solo en GPU |
 
 ---
 
 ## 6. Decisiones abiertas
 
-1. **Re-correr el sweep (EVAL-06):** ¿se regenera `data_h4.parquet` con el código actual (11 dims +
-   LPT + 2 semillas) o se conserva como "resultados v1" etiquetado?
-2. **Hold-out (EVAL-01):** ¿estratificado por MI o se asume el corte temporal como "otra carga"?
-3. **Reconstruir `java-sim` (SIM-06):** limpiar el SLA y la 12.ª dimensión del gateway requiere
-   rebuild de la imagen Java.
-4. **Hardware objetivo del despliegue:** decide si el eje es `packed_size_mb` (memoria/edge) o
+1. **Re-correr el sweep:** ¿se regenera `data_h4.parquet` como v2 (11 dims, LPT, split estratificado,
+   132 celdas) o se conserva el snapshot v1 solo como histórico?
+2. **Reconstruir `java-sim` (SIM-06):** limpiar el SLA y la 12.ª dimensión del gateway exige rebuild
+   de la imagen Java (Maven).
+3. **Hardware objetivo del despliegue:** decide si el eje es `packed_size_mb` (memoria/edge) o
    latencia real (servidor), y si tiene sentido seguir escalando batch.
-5. **Orden de despacho (SIM-04):** hoy es LPT por trabajo por PE; alternativas: SPT (minimiza el
-   tiempo medio de finalización) o mantener el orden del trace como baseline explícito.
+4. **Orden de despacho (SIM-04):** hoy LPT por trabajo/PE; alternativas: SPT (minimiza el tiempo medio
+   de finalización) o mantener el orden del trace como baseline explícito.

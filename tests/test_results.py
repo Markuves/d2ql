@@ -24,6 +24,7 @@ def _run_result(experiment_id: str, seed: int, reward: float) -> RunResult:
         latency_p50_ms=0.1,
         latency_p95_ms=0.2,
         latency_n_samples=10,
+        padding_overhead_ms=0.0,
         throughput_pps=1000.0,
         throughput_batch_size=64,
         params=1234,

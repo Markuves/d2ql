@@ -94,11 +94,12 @@ class AzureTraceLoader:
         self._windows: list[pd.DataFrame] = self._partition()
         self._split_holdout()
         logger.info(
-            "AzureTraceLoader ready: %d rows -> %d episode windows (%d train / %d eval / length %d).",
+            "AzureTraceLoader ready: %d rows -> %d episode windows (%d train / %d eval / %d temporal / length %d).",
             len(self._df),
             len(self._windows),
             len(self._train_windows),
             len(self._test_windows),
+            len(self._temporal_windows),
             self.episode_length,
         )
 
@@ -107,17 +108,54 @@ class AzureTraceLoader:
     # ------------------------------------------------------------------
 
     def _split_holdout(self) -> None:
-        """Hold out the trailing `holdout_frac` fraction of windows (chronological)."""
+        """Split train/eval **stratified by MI**, keeping the chronological tail apart.
+
+        A plain chronological tail is a different regime: the last 20 % of the
+        trace has ~10x less work per window than the rest, so `eval_*` metrics
+        measured there were not comparable with anything seen in training
+        (docs/backlog.md, EVAL-01). The quality metric now uses a systematic
+        sample over the MI distribution (every k-th window of the MI-sorted
+        order), which is disjoint from training and has the same MI mean. The
+        trailing windows are still available through ``temporal_episodes`` as a
+        separate temporal-generalisation test.
+        """
         n = len(self._windows)
         if self.holdout_frac > 0.0 and n > 1:
             n_test = max(1, int(round(n * self.holdout_frac)))
-            self._train_windows = self._windows[: n - n_test]
-            self._test_windows = self._windows[n - n_test :]
+            # Chronological tail (temporal generalisation only).
+            self._temporal_windows = self._windows[n - n_test:]
+
+            # Systematic sample over the MI-sorted order -> matched distribution.
+            mi = np.array([float(w["mi"].mean()) for w in self._windows])
+            order = np.argsort(mi, kind="stable")
+            step = n / float(n_test)
+            # Half-step offset: take the middle of each block, not its first
+            # element (otherwise the sample is systematically the lightest
+            # window of every block).
+            test_pos = {
+                int(min(n - 1, max(0, round((k + 0.5) * step)))) for k in range(n_test)
+            }
+            self._test_windows = [self._windows[order[pos]] for pos in sorted(test_pos)]
+            self._train_windows = [
+                w for i, w in enumerate(self._windows) if i not in test_pos
+            ]
         else:
             self._train_windows = self._windows
             self._test_windows = self._windows
-        logger.info("Holdout split: holdout_frac=%.2f -> %d train / %d eval windows",
-                    self.holdout_frac, len(self._train_windows), len(self._test_windows))
+            self._temporal_windows = self._windows
+
+        train_mi = float(np.mean([w["mi"].mean() for w in self._train_windows])) if self._train_windows else float("nan")
+        eval_mi = float(np.mean([w["mi"].mean() for w in self._test_windows])) if self._test_windows else float("nan")
+        logger.info(
+            "Holdout split: holdout_frac=%.2f -> %d train / %d eval windows | "
+            "MI mean train=%.1f eval=%.1f | temporal tail=%d windows",
+            self.holdout_frac,
+            len(self._train_windows),
+            len(self._test_windows),
+            train_mi,
+            eval_mi,
+            len(self._temporal_windows),
+        )
 
     # ------------------------------------------------------------------
     # Loading and partitioning
@@ -208,10 +246,11 @@ class AzureTraceLoader:
                 yielded += 1
 
     def eval_episodes(self, n_episodes: int) -> list[list[CloudletSpec]]:
-        """
-        Deterministically sample n_episodes windows from the HELD-OUT eval
-        set (C1 fix). Used for fair, epsilon-free evaluation and business-metric
-        reporting on workload the agent never trained on.
+        """Sample n_episodes held-out windows **from the MI-stratified split**.
+
+        The stratified split is disjoint from training and matches its MI
+        distribution, so the reported quality is comparable with the training
+        regime (EVAL-01).
         """
         if not self._test_windows:
             return []
@@ -219,6 +258,22 @@ class AzureTraceLoader:
         self.rng.shuffle(indices)
         return [
             self._window_to_specs(self._test_windows[idx])
+            for idx in indices[:n_episodes]
+        ]
+
+    def temporal_episodes(self, n_episodes: int) -> list[list[CloudletSpec]]:
+        """Sample n_episodes windows from the **chronological tail** (last windows).
+
+        Kept as a separate temporal-generalisation test: it answers "how does the
+        policy do on the newest slice of the trace", not "how good is it on the
+        workload it was trained on". Not used for the quality metric.
+        """
+        if not self._temporal_windows:
+            return []
+        indices = list(range(len(self._temporal_windows)))
+        self.rng.shuffle(indices)
+        return [
+            self._window_to_specs(self._temporal_windows[idx])
             for idx in indices[:n_episodes]
         ]
 

@@ -9,12 +9,6 @@ services:
     environment:
       # pass GATEWAY_PORT so SimulationGateway reads it from env
       - GATEWAY_PORT=25333
-      - DATASET_PATH=/app/data/workload.csv.gz
-      - WORKLOAD_TIME_SCALE=0.001
-      - WORKLOAD_MIPS=1000
-      - WINDOW_DURATION=60000
-      - MAX_CLOUDLETS_PER_WINDOW=100
-      - INITIAL_WINDOW_START=0
     volumes:
       - ./data:/app/data
     restart: unless-stopped
@@ -66,12 +60,6 @@ services:
     environment:
       - JAVA_HOST=java-sim
       - JAVA_PORT=25333
-      - DATASET_PATH=/app/data/workload.csv.gz
-      - WORKLOAD_TIME_SCALE=0.001
-      - WORKLOAD_MIPS=1000
-      - WINDOW_DURATION=60000
-      - MAX_CLOUDLETS_PER_WINDOW=100
-      - INITIAL_WINDOW_START=0
       - NVIDIA_DRIVER_CAPABILITIES=compute,utility,video
       - NVIDIA_DISABLE_REQUIRE=1
       - CUDA_MODULE_LOADING=LAZY

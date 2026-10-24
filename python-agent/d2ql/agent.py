@@ -380,6 +380,55 @@ class DDQNAgent:
             "n_samples": n_samples,
         }
 
+    def benchmark_padding_overhead(
+        self,
+        state_dim: int,
+        n_samples: int = 200,
+        warmup: int = 20,
+        padding_batch: int = 17,
+    ) -> float:
+        """Extra per-decision latency caused by padding batch=1 to the kernel minimum.
+
+        ``torch._int_mm`` needs ``M > 16``, so a single-sample deploy forward is
+        zero-padded to 17 rows and pays that work anyway. This measures batch=1
+        against a full 17-row batch (no padding) and reports the difference per
+        sample in milliseconds (PERF-03). On CPU/fp32 both paths are identical,
+        so the value is ~0.
+        """
+        self.online_net.eval()
+        self.online_net.set_deploy(True)
+        try:
+            ms_single = self._timed_forward_ms(state_dim, 1, n_samples, warmup)
+            ms_batched = self._timed_forward_ms(
+                state_dim, max(int(padding_batch), 17), n_samples, warmup
+            )
+        finally:
+            self.online_net.set_deploy(False)
+        per_sample = ms_batched / max(int(padding_batch), 17)
+        return float(max(0.0, ms_single - per_sample))
+
+    def _timed_forward_ms(
+        self, state_dim: int, batch_size: int, n_samples: int, warmup: int
+    ) -> float:
+        """Mean wall-clock time of one forward call of a fixed batch size."""
+        import time as _time
+
+        inp = torch.zeros(
+            int(batch_size), state_dim, dtype=self.param_dtype, device=self.device
+        )
+        with torch.no_grad():
+            for _ in range(max(int(warmup), 1)):
+                self._cast_fwd(self.online_net, inp)
+        if self.device.type == "cuda":
+            torch.cuda.synchronize()
+        t0 = _time.perf_counter()
+        with torch.no_grad():
+            for _ in range(max(int(n_samples), 1)):
+                self._cast_fwd(self.online_net, inp)
+        if self.device.type == "cuda":
+            torch.cuda.synchronize()
+        return (_time.perf_counter() - t0) / max(int(n_samples), 1) * 1000.0
+
     def benchmark_throughput(
         self,
         state_dim: int,

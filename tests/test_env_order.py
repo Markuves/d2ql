@@ -24,6 +24,7 @@ class FakeSim:
         self.rows = []
         self.seed = None
         self.steps = []
+        self.energy = 0.0
 
     def setSeed(self, seed):
         self.seed = seed
@@ -48,7 +49,7 @@ class FakeSim:
         return [0.0] * 4
 
     def getTotalEnergyConsumed(self):
-        return 0.0
+        return self.energy
 
     def getMakespan(self):
         return 0.0
@@ -101,3 +102,22 @@ def test_step_returns_energy_delta_and_no_sla(stub_env):
     assert "energy_delta" in info
     assert "sla_violations" not in info
     assert stub_env.sim.steps == [1]
+
+
+def test_step_returns_the_reward_from_the_energy_delta(stub_env):
+    # First step: no energy consumed -> reward 0.
+    _, reward0, _, _, _ = stub_env.step(0)
+    assert reward0 == pytest.approx(0.0)
+
+    # Second step: a full E_step_max of energy -> reward -1.
+    stub_env.sim.energy = stub_env.reward_fn.e_step_max
+    _, reward1, _, _, info = stub_env.step(0)
+    assert info["energy_delta"] == pytest.approx(stub_env.reward_fn.e_step_max)
+    assert reward1 == pytest.approx(-1.0)
+
+
+def test_env_reward_matches_the_reward_manager(stub_env):
+    from d2ql.reward import RewardManager
+
+    assert isinstance(stub_env.reward_fn, RewardManager)
+    assert stub_env.reward_fn.e_step_max > 0

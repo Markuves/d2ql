@@ -12,6 +12,7 @@ The Q-network is instantiated and updated at a chosen precision.
 
 from __future__ import annotations
 
+import logging
 import math
 import os
 from typing import Optional
@@ -19,6 +20,8 @@ from typing import Optional
 import torch
 import torch.nn as nn
 import torch.nn.functional as F  # noqa: N812 -- idiomatic PyTorch alias
+
+logger = logging.getLogger(__name__)
 
 PRECISION_BITS = {
     "ternary": 1.58,
@@ -171,8 +174,14 @@ def lowbit_deploy_matmul(
         try:
             from d2ql.kernels import lowbit_matmul_triton
             return lowbit_matmul_triton(x, weight, bias)
-        except Exception:
-            pass  # fall through to int_mm
+        except ImportError as exc:
+            # Triton is an optional extra (`uv sync --extra kernels`); say so
+            # instead of silently falling back.
+            logger.warning(
+                "D2QL_LOWBIT_BACKEND=triton but Triton is unavailable (%s); "
+                "falling back to torch._int_mm. Install with `uv sync --extra kernels`.",
+                exc,
+            )
     return lowbit_real_matmul(x, weight, bias)
 
 
@@ -348,20 +357,3 @@ def lookup_max_hidden(mapping: dict, name: str):
         if key in mapping:
             return int(mapping[key])
     return None
-
-
-def h4_capacity_plan(bits_list, hidden_sizes, max_hidden_size: dict) -> list[tuple[str, int]]:
-    """
-    Capacity-major schedule: every precision starts at the same hidden width,
-    then larger widths drop higher-precision models.
-    """
-    plan: list[tuple[str, int]] = []
-    for hidden in hidden_sizes:
-        hidden = int(hidden)
-        for raw in bits_list:
-            name = parse_precision(raw)
-            cap = lookup_max_hidden(max_hidden_size, name)
-            if cap is not None and hidden > cap:
-                continue
-            plan.append((name, hidden))
-    return plan

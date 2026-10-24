@@ -79,6 +79,16 @@ def load_results(path: Path) -> pd.DataFrame:
     ]:
         if col in df.columns:
             df[col] = pd.to_numeric(df[col], errors="coerce")
+    # EVAL-06: label every row by schema version so v1 (12 dims, trace order,
+    # SLA columns) is never mixed with v2 in the same front.
+    if "extra" in df.columns:
+        def _schema(raw: object) -> int:
+            try:
+                return int(json.loads(str(raw)).get("schema_version", 1))
+            except (TypeError, ValueError, json.JSONDecodeError):
+                return 1
+
+        df["schema_version"] = df["extra"].map(_schema)
     return df
 
 
@@ -150,6 +160,12 @@ def render(df: pd.DataFrame, quality: str) -> str:
     out(f"# Pareto H4 — calidad (recompensa solo por energía) = `{quality}`\n")
     out(f"- filas: {len(df)} | semillas distintas: {n_seeds} "
         f"| celdas (precisión×device×ancho): {df.groupby(GROUP_KEYS).ngroups}\n")
+    if "schema_version" in df.columns:
+        versions = sorted(int(v) for v in df["schema_version"].unique())
+        out(f"- schema_version: {versions} (2 = obs 11 dims, orden LPT, sin SLA)\n")
+        if len(versions) > 1 or versions[0] < 2:
+            out("> Aviso: hay filas de esquemas distintos (o v1 sin provenance). "
+                "No son comparables entre sí: filtrar por `schema_version` antes de leer el frente.\n")
 
     agg = aggregate(df, quality)
     q_mean = f"{quality}_mean"
