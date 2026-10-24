@@ -229,9 +229,11 @@ class AzureTraceLoader:
         shuffle: bool = True,
     ) -> Iterator[list[CloudletSpec]]:
         """
-        Yield n_episodes lists of CloudletSpec, sampling TRAIN windows with
-        replacement. shuffle=True (H3 mode) randomises window order each
-        epoch so the agent sees varied workload orderings.
+        Yield n_episodes lists of CloudletSpec from the TRAIN windows.
+
+        Windows are visited with replacement *between epochs*: `shuffle=True`
+        (H3 mode) reshuffles the window order each pass, so a run longer than the
+        number of windows keeps sampling the whole distribution.
         """
         window_indices = list(range(len(self._train_windows)))
         yielded = 0
