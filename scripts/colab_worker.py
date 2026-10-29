@@ -6,7 +6,6 @@ def run_cmd(cmd):
     print(f"\n>>> Running: {cmd}", flush=True)
     sys.stdout.flush()
     sys.stderr.flush()
-    # Usar Popen para transmitir stdout y stderr en tiempo real
     process = subprocess.Popen(
         cmd,
         shell=True,
@@ -25,23 +24,31 @@ def run_cmd(cmd):
         sys.exit(return_code)
 
 def main():
+    # 1. Leer argumentos desde CLI o desde variables de entorno
     args = sys.argv[1:]
-    arg_str = " ".join(args)
-    print(f"Colab worker starting with arguments: {arg_str}", flush=True)
+    shard_id = os.environ.get("SHARD_ID")
+    num_shards = os.environ.get("NUM_SHARDS")
+    slice_arg = os.environ.get("SLICE")
 
-    # 1. Clonar o actualizar el repositorio
+    if not args:
+        if slice_arg:
+            args = [f"--slice {slice_arg}"]
+        elif shard_id is not None and num_shards is not None:
+            args = [f"--shard-id {shard_id}", f"--num-shards {num_shards}"]
+
+    arg_str = " ".join(args)
+    print(f"Colab worker starting with resolved arguments: '{arg_str}'", flush=True)
+
+    # 2. Clonar o actualizar el repositorio en Colab
     if not os.path.exists("d2ql"):
         run_cmd("git clone -b run_exp_colab https://github.com/Markuves/d2ql.git d2ql")
     else:
         run_cmd("cd d2ql && git fetch origin run_exp_colab && git checkout run_exp_colab && git pull origin run_exp_colab")
 
-    # 2. Diagnóstico de entorno
-    run_cmd("which bash && which sh && which git && which python3")
-
-    # 3. Limpieza de saltos de línea CRLF en todo scripts/
+    # 3. Limpiar CRLF si existiera
     run_cmd("cd d2ql && sed -i 's/\\r$//' scripts/*.sh scripts/*.py && chmod +x scripts/*.sh")
 
-    # 4. Ejecución del script
+    # 4. Ejecutar el colab_runner.sh
     run_cmd(f"cd d2ql && bash -x scripts/colab_runner.sh {arg_str}")
 
 if __name__ == "__main__":
