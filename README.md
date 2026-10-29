@@ -144,3 +144,48 @@ This project evaluates the following experimental targets:
 Retired hypotheses:
 * **H1 (adaptive reward weighting)** — superseded when the reward became energy-only (`r_t = -ΔE_t / E_step_max`); the weight vector is gone from both code and configs.
 * **H2 (post-training quantization)** — superseded by H4 native bit-width training; the standalone PTQ module and its config were removed.
+
+
+---
+
+## Distributed Execution on Google Colab (via Official `google-colab-cli`)
+
+For heavy sweeps such as **H4 Native Bit-Width Training** (66 combinations across precisions, capacities, depths, and seeds), you can run parallel instances in background using Google's official [Google Colab CLI](https://developers.googleblog.com/introducing-the-google-colab-cli/) (`google-colab-cli`).
+
+This partitions the 66 combinations across 2 remote Colab GPU instances (33 runs each) in a fire-and-forget manner:
+- **Worker 1:** `--shard-id 0 --num-shards 2` (runs combinations 0 to 32)
+- **Worker 2:** `--shard-id 1 --num-shards 2` (runs combinations 33 to 65)
+
+### 1. Install & Authenticate the Colab CLI
+On your local terminal (Linux, macOS, or Windows WSL2):
+```bash
+# Install with uv (recommended) or pip
+uv tool install google-colab-cli
+# or: pip install google-colab-cli
+
+# Authenticate with your Google account (Colab Pro)
+colab auth
+```
+
+### 2. Launch Worker 1 (Combinations 0..32)
+In terminal 1:
+```bash
+colab run --gpu T4 -- "git clone -b run_exp_colab <YOUR_REPO_URL> d2ql && cd d2ql && bash scripts/colab_runner.sh --shard-id 0 --num-shards 2"
+```
+
+### 3. Launch Worker 2 (Combinations 33..65)
+In terminal 2:
+```bash
+colab run --gpu T4 -- "git clone -b run_exp_colab <YOUR_REPO_URL> d2ql && cd d2ql && bash scripts/colab_runner.sh --shard-id 1 --num-shards 2"
+```
+
+### How `colab run` works behind the scenes:
+1. Provisions remote Colab VMs with requested GPUs (e.g. `T4` or `A100`).
+2. Runs `scripts/colab_runner.sh`, which automatically:
+   - Configures OpenJDK 21 and builds `java-sim` fat JAR.
+   - Starts the Py4J Gateway in background on port `25333`.
+   - Downloads and unzips the Azure VM trace dataset (`data/workload.csv.gz`).
+   - Syncs dependencies with `uv` and executes the partitioned slice.
+3. Once the 33 runs finish on each machine, the remote Colab instances automatically tear down so no extra compute units are consumed.
+
+*(Optional)* You can also monitor or execute via Colab web notebook using [`notebooks/colab_run_experiments.ipynb`](notebooks/colab_run_experiments.ipynb).
