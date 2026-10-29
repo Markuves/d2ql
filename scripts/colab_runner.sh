@@ -20,10 +20,21 @@ echo "================================================================="
 
 # 1. Install Java 21 & Maven for CloudSimPlus Gateway
 echo "[1/5] Checking Java & Maven..."
+PACKAGES_TO_INSTALL=""
 if ! command -v java >/dev/null 2>&1 || ! java -version 2>&1 | grep -q "21"; then
-    echo "Installing OpenJDK 21 & Maven..."
+    PACKAGES_TO_INSTALL="$PACKAGES_TO_INSTALL openjdk-21-jdk"
+fi
+if ! command -v mvn >/dev/null 2>&1; then
+    PACKAGES_TO_INSTALL="$PACKAGES_TO_INSTALL maven"
+fi
+if ! command -v nc >/dev/null 2>&1; then
+    PACKAGES_TO_INSTALL="$PACKAGES_TO_INSTALL netcat-openbsd"
+fi
+
+if [ -n "$PACKAGES_TO_INSTALL" ]; then
+    echo "Installing missing packages:$PACKAGES_TO_INSTALL..."
     sudo apt-get update -qq
-    sudo apt-get install -y -qq openjdk-21-jdk maven netcat-openbsd
+    sudo apt-get install -y -qq $PACKAGES_TO_INSTALL
 fi
 
 # 2. Compile Java Sim JAR if not compiled
