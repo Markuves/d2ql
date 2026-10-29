@@ -5,7 +5,7 @@ experiment:
   # P2: each (precision, device, hidden) configuration is replicated once per
   # seed. A single seed with 10 eval episodes cannot separate a real effect from
   # run-to-run noise, so every cell is repeated here.
-  seeds: [42, 41]
+  seeds: [42]
   description: >
     Native bit-width training from initialization, with a shared capacity
     sweep. Every precision starts at the same hidden width; larger widths
