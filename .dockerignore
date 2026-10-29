@@ -1,3 +1,29 @@
-data/workload.csv.gz
-outputs/
-configs/
+# Keep the build context small: only what the Dockerfiles copy is needed.
+.git
+.gitignore
+.venv
+.venv-python
+
+# Python caches
+**/__pycache__
+**/*.py[cod]
+.pytest_cache
+.ruff_cache
+.mypy_cache
+.ipynb_checkpoints
+
+# Data, results and notebooks are bind-mounted at runtime, never baked
+data
+outputs
+notebooks
+
+# Docs/tests are not copied into the images
+docs
+tests
+
+# Java build output (Maven regenerates it inside the builder stage)
+java-sim/target
+
+# Course material that lives in the repo root
+Lab_Simplex_Computacional.ipynb
+Laboratorio Simplex.pdf

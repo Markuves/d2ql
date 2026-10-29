@@ -95,10 +95,12 @@ def _run_heldout_eval(
             "eval_makespan": float("nan"),
             "eval_avg_steps": float("nan"),
             "eval_norm_reward": float("nan"),
+            "eval_truncated_episodes": 0,
         }
 
     total_reward = 0.0
     total_steps = 0
+    truncated_eval_episodes = 0
     makespans: list[float] = []
 
     for cloudlets in eval_cloudlets:
@@ -116,6 +118,13 @@ def _run_heldout_eval(
         total_reward += ep_reward
         total_steps += step_count
         makespans.append(float(info.get("makespan", 0.0)))
+        if truncated:
+            truncated_eval_episodes += 1
+            logger.warning(
+                "Eval episode truncated: %d/%d cloudlets finished",
+                info.get("finished_cloudlets", -1),
+                info.get("n_cloudlets", -1),
+            )
 
     avg_makespan = sum(makespans) / max(len(makespans), 1)
     avg_reward = total_reward / max(n_episodes, 1)
@@ -134,6 +143,7 @@ def _run_heldout_eval(
         "eval_makespan": avg_makespan,
         "eval_avg_steps": avg_steps,
         "eval_norm_reward": norm_reward,
+        "eval_truncated_episodes": truncated_eval_episodes,
     }
 
 
@@ -581,6 +591,7 @@ def _run_one_training(config: dict) -> None:
     eval_window_episodes = 0
     best_window_mean = float("-inf")
     best_window_episode = 0
+    truncated_episodes = 0
     episodes_trained = 0
     steps_total = 0  # C2: accumulate steps across episodes for avg_steps
     stopped_early = False
@@ -632,6 +643,16 @@ def _run_one_training(config: dict) -> None:
 
         agent.decay_epsilon()
         steps_total += step_count  # C2
+        if truncated:
+            truncated_episodes += 1
+            logger.warning(
+                "Episode %d truncated: %d/%d cloudlets finished | sim_running=%s | steps=%d",
+                episode + 1,
+                info.get("finished_cloudlets", -1),
+                info.get("n_cloudlets", -1),
+                info.get("simulation_running"),
+                step_count,
+            )
 
         makespan = info.get("makespan", 0.0)
         energy = info.get("energy", 0.0)
@@ -879,6 +900,8 @@ def _run_one_training(config: dict) -> None:
             dispatch_order="lpt_work_per_pe",
             eval_split="stratified_mi",
             tb_series_dir=str(tb_series_dir),
+            truncated_episodes=truncated_episodes,
+            eval_truncated_episodes=eval_metrics["eval_truncated_episodes"],
         ),
     )
     save_run_result(

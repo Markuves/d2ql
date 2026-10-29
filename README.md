@@ -96,6 +96,21 @@ To safely stop and clean up containers and networks:
 docker compose down
 ```
 
+### 4. Rebuilding after code changes
+
+The images **bake the source** (`COPY python-agent/d2ql ./d2ql`), so `docker compose up` keeps running
+the code that was in the image when it was built. After editing Python/Java code, `pyproject.toml` or
+`uv.lock`, rebuild:
+
+```bash
+GIT_SHA=$(git rev-parse --short HEAD) docker compose build
+docker compose up -d
+```
+
+`configs/`, `data/` and `outputs/` are bind-mounted, so config and data changes do **not** need a
+rebuild. Symptoms of a stale image: a `KeyError: 'datacenter'` in `d2ql/env.py` (that key was removed
+in favour of the fixed 4-host topology) or old line numbers in tracebacks.
+
 ---
 
 ## Telemetry and Logging

@@ -4,7 +4,9 @@ import org.cloudsimplus.allocationpolicies.VmAllocationPolicySimple;
 import org.cloudsimplus.brokers.DatacenterBrokerSimple;
 import org.cloudsimplus.cloudlets.Cloudlet;
 import org.cloudsimplus.cloudlets.CloudletSimple;
+import org.cloudsimplus.core.CloudSimEntity;
 import org.cloudsimplus.core.CloudSimPlus;
+import org.cloudsimplus.core.events.SimEvent;
 import org.cloudsimplus.datacenters.DatacenterSimple;
 import org.cloudsimplus.hosts.HostSimple;
 import org.cloudsimplus.resources.Pe;
@@ -44,6 +46,8 @@ public class SimulationGateway {
     private int currentCloudletIndex = 0;
     private boolean finished = false;
     private double totalEnergyConsumed = 0.0;
+    // SIM-09: energy is integrated over the real clock delta of each step.
+    private double lastEnergyClock = 0.0;
     // C3 fix: differentiated per-host cost (price per watt differs per host), so
     // operational cost is NOT a constant multiple of energy. The agent can learn
     // to prefer cheaper hosts, decoupling the cost objective from energy.
@@ -83,6 +87,37 @@ public class SimulationGateway {
     // pinning the VM-to-host mapping explicitly.
     private long seed = 42L;
     private final Random gatewayRandom = new Random(this.seed);
+
+    /**
+     * Keeps a pending event in the queue for the whole episode.
+     *
+     * CloudSimPlus calls {@code finish()} inside {@code runFor} as soon as the
+     * event queue is momentarily empty. Since cloudlets are submitted one per
+     * step, that ended the simulation mid-window: later submissions were ignored
+     * (cloudlets never ran), the clock stopped advancing (~0.01 s per step while
+     * energy was charged per 1 s) and the broker blew up with a
+     * ConcurrentModificationException. A 0.5 s heartbeat makes every
+     * {@code runFor(1.0)} advance the clock by one second and keeps the engine
+     * alive until the episode decides to stop (SIM-08/SIM-09/SIM-10).
+     */
+    private static final class Heartbeat extends CloudSimEntity {
+        private static final int TAG = 9001;
+        private static final double PERIOD = 0.5;
+
+        Heartbeat(final CloudSimPlus simulation) {
+            super(simulation);
+        }
+
+        @Override
+        protected void startInternal() {
+            schedule(PERIOD, TAG);
+        }
+
+        @Override
+        public void processEvent(final SimEvent evt) {
+            schedule(PERIOD, TAG);
+        }
+    }
 
     public SimulationGateway() {
         // Workload windows are pushed from Python per episode.
@@ -201,6 +236,7 @@ public class SimulationGateway {
         currentCloudletIndex = 0;
         finished             = false;
         totalEnergyConsumed  = 0.0;
+        lastEnergyClock      = 0.0;
         totalOperationalCost = 0.0;
         slaViolationCount    = 0;
         countedSlaCloudlets.clear();
@@ -223,6 +259,8 @@ public class SimulationGateway {
         );
         datacenter = new DatacenterSimple(simulation, hosts, pinnedPolicy);
         broker     = new DatacenterBrokerSimple(simulation);
+        // SIM-09/SIM-10: keep the engine alive while the window is dispatched.
+        new Heartbeat(simulation);
 
         // Build VMs (no pre-start setHost; allocation policy handles placement).
         for (int i = 0; i < NUM_VMS; i++) {
@@ -328,6 +366,17 @@ public class SimulationGateway {
         return times;
     }
 
+    /** Diagnostic: how many cloudlets of the window already finished. */
+    public int getFinishedCloudletCount() {
+        int finished = 0;
+        for (Cloudlet c : cloudlets) {
+            if (c.getFinishTime() > 0.0) {
+                finished++;
+            }
+        }
+        return finished;
+    }
+
     /** Diagnostic: is the CloudSimPlus engine still processing events? */
     public boolean isSimulationRunning() {
         return simulation != null && simulation.isRunning();
@@ -336,6 +385,11 @@ public class SimulationGateway {
     /** Diagnostic: cloudlets of the window that have not been dispatched yet. */
     public int getPendingCloudlets() {
         return Math.max(0, cloudlets.size() - currentCloudletIndex);
+    }
+
+    /** Diagnostic: cloudlets sitting in the broker's waiting list. */
+    public int getWaitingCloudletCount() {
+        return broker == null ? 0 : broker.getCloudletWaitingList().size();
     }
 
     public double getOperationalCost() {
@@ -374,6 +428,17 @@ public class SimulationGateway {
     }
 
     private void updateEnergyAndSla() {
+        // SIM-09: integrate over the simulated time actually elapsed since the
+        // previous update instead of assuming a fixed 1-second step. `runFor`
+        // advances only up to the next event, so the old hardcoded 1 s inflated
+        // energy by ~2-100x depending on the step.
+        final double now = simulation.clock();
+        final double dt = now - lastEnergyClock;
+        if (dt <= 0.0) {
+            return;
+        }
+        lastEnergyClock = now;
+
         double stepEnergy = 0.0;
         double stepCost = 0.0;
         for (int i = 0; i < hosts.size(); i++) {
@@ -390,9 +455,9 @@ public class SimulationGateway {
             double price = HOST_PRICE_PER_WATT[Math.min(i, HOST_PRICE_PER_WATT.length - 1)];
             stepCost += power * price;
         }
-        // Convert watts to watt-hours (step size = 1 simulated second)
-        totalEnergyConsumed += stepEnergy / 3600.0;
-        totalOperationalCost += stepCost / 3600.0; // C3
+        // Watts * elapsed simulated seconds -> watt-hours.
+        totalEnergyConsumed += stepEnergy * dt / 3600.0;
+        totalOperationalCost += stepCost * dt / 3600.0; // C3
 
         // A2 fix: count each cloudlet as an SLA violation at most once. Previously
         // every finished-and-past-deadline cloudlet was re-counted on each step,

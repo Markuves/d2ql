@@ -1,0 +1,51 @@
+# Temporary: mimics the H4 shape (episode_length 50) with 2 episodes to verify
+# that the *built image* (no bind mounts) runs the current code end to end.
+experiment:
+  id: verify_h4like
+  hypothesis: H4
+  seed: 42
+py4j:
+  host: java-sim
+  port: 25333
+workload:
+  trace_path: data/workload.csv.gz
+  episode_length: 50
+  shuffle: false
+  holdout_frac: 0.2
+  simulation_time_scale: 0.01
+evaluation:
+  n_episodes: 1
+agent:
+  precision: "32"
+  device: cpu
+  hidden_size: 64
+  n_hidden_layers: 1
+  learning_rate: 0.0005
+  gamma: 0.98
+  target_update_freq: 10
+  batch_size: 8
+  replay_buffer_capacity: 500
+  replay_buffer_warmup: 10
+  gradient_clip_norm: 10.0
+  epsilon_start: 1.0
+  epsilon_end: 0.05
+  epsilon_decay: 0.85
+  per_alpha: 0.6
+  per_beta_start: 0.4
+  per_beta_end: 1.0
+training:
+  n_episodes: 2
+  eval_every_n_episodes: 1
+  checkpoint_dir: outputs/checkpoints/verify
+  tensorboard_dir: outputs/tensorboard
+early_stopping:
+  enabled: false
+latency:
+  benchmark: true
+  n_samples: 5
+  warmup: 1
+  throughput_batch_sizes: [1, 8]
+  throughput_batch_size: 1
+  throughput_n_batches: 3
+results:
+  csv_dir: outputs/results_verify

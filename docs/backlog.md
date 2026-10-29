@@ -7,8 +7,9 @@ Reemplaza a los históricos `h4_early_stopping_y_resultados.md`, `h6_energy_rewa
 `r1_recommendations.md` y `r2_decisiones_precision_capacidad.md` (eliminados). `h5_heuristics.md`
 sigue siendo el documento operativo de ese experimento.
 
-> Última revisión: **2026-10-24** (cuarta tanda: EVAL-04, LOG-04, LOG-05, LOG-06, LOG-07, LOG-08,
-> SIM-08, REPO-09 + export de TensorBoard a series CSV; se descubrió **SIM-09**). Alcance:
+> Última revisión: **2026-10-29** (quinta tanda: se corrigió la energía por `dt` real —SIM-09—, se
+> añadió un heartbeat al gateway para que la simulación no muera a mitad de ventana y se descubrió
+> **SIM-10**: con 50 cloudlets solo 40 terminan). Alcance:
 > `python-agent/`, `java-sim/`, `configs/`, `tests/`, `docs/`, `notebooks/`, `docker-compose*.yml`,
 > `Dockerfile.python`, `pyproject.toml`.
 
@@ -50,13 +51,13 @@ GIT_SHA=$(git rev-parse --short HEAD) docker compose build python-agent
 | Estado | P0 | P1 | P2 | P3 | Total |
 |---|---|---|---|---|---|
 | propuesto | 1 | 0 | 3 | 2 | 6 |
-| hecho | 0 | 0 | 0 | 0 | 38 |
+| hecho | 0 | 0 | 0 | 0 | 40 |
 | descartado | 1 | 1 | 0 | 0 | 2 + 5 históricos |
 | bloqueado | 0 | 0 | 0 | 0 | 0 (4 decisiones abiertas) |
 
-Queda un solo P0 abierto y es nuevo: **SIM-09** (la energía se cobra por paso como si fuera 1 s de
-simulación, pero el reloj avanza ~0.01 s por paso). Cualquier cifra de energía/reward publicada hoy
-está inflada ~100× respecto al tiempo simulado.
+Queda un solo P0 abierto: **SIM-10** (en ventanas de 50 cloudlets solo se ejecutan 40; el broker se
+queda sin trabajo y apaga la simulación a mitad del episodio). SIM-09 (energía vs reloj) ya está
+corregido: la energía se integra con el `dt` real.
 
 ---
 
@@ -64,23 +65,25 @@ está inflada ~100× respecto al tiempo simulado.
 
 ### P0 — invalidan cifras publicadas
 
-#### SIM-09 · La energía se cobra por paso asumiendo 1 s, pero el reloj avanza ~0.01 s
+#### SIM-10 · Con 50 cloudlets solo se ejecutan 40 (el broker apaga la simulación a mitad de ventana)
 - **Estado:** propuesto · **P0**
-- **Evidencia (diagnóstico con el gateway actual, 10 cloudlets, 18 pasos):**
-  `clock` avanza 0.000 → 0.010 → 0.048 → … → **0.158 s en total**, mientras
-  `getTotalEnergyConsumed()` sube ~0.108–0.12 Wh por paso (≈ **18 s** de potencia). Es decir, la
-  energía acumulada corresponde a ~114× el tiempo simulado transcurrido.
-  Causa: `SimulationGateway.step()` hace `simulation.runFor(1.0)` pero el reloj avanza solo hasta el
-  siguiente evento (≈0.01 s); `updateEnergyAndSla()` suma `power × 1 s / 3600` con un 1 s fijo.
-- **Impacto:** `episode/energy`, `episode/total_reward`, `eval_*` y cualquier comparación energética
-  están en una escala que no es tiempo simulado. Además `norm_reward` (reward por paso) no es
-  "reward por segundo".
-- **Fix propuesto:** (a) acumular energía con el **dt real** (`clock − clock_prev`) en
-  `updateEnergyAndSla`, que es físicamente correcto sea cual sea la mecánica de `runFor`; y (b) revisar
-  el ciclo de vida `startSync()` + `runFor()` para que cada paso avance exactamente 1 s si eso es lo
-  que se quiere simular.
-- **Criterio:** `Σ energía` de un episodio ≈ `P_medio × (clock_final − clock_inicial)` y
-  `Δclock == 1.0` por paso.
+- **Evidencia (ventana de 50 cloudlets, gateway actual):** el episodio llega a `pending=0`
+  (los 50 despachados) y `waiting=0`, pero `finished_cloudlets` se queda en **40/50** y el `makespan`
+  se congela en 2.84 s; el reloj sigue avanzando por el heartbeat y la corrida solo termina por el
+  tope de seguridad (`truncated=True`). Antes de SIM-08 el síntoma era silencioso: el episodio
+  acababa al apagarse el simulador y los cloudlets que faltaban se perdían sin aviso.
+  Causa: el diseño despacha **un cloudlet por paso** mientras CloudSimPlus espera que el broker
+  reciba la ventana completa; cuando el broker ve `cloudletWaitingList` vacía y sus VMs ociosas,
+  `requestShutdownWhenIdle()` apaga la simulación y las peticiones posteriores ya no se ejecutan.
+- **Impacto:** con `episode_length=50` (config H4) las métricas se calculan sobre 40 cloudlets; con
+  10 cloudlets (smoke) no se ve. Cualquier cifra de H4 publicada arrastra este sesgo.
+- **Fix propuesto (elegir uno):** (a) enviar la ventana completa al broker al inicio y aplicar la
+  decisión del agente al *vincular* cada cloudlet a su VM en el paso correspondiente (requiere
+  cambiar el contrato del gateway); (b) mantener el broker vivo con un cloudlet/VM centinela que no
+  compute (no debe entrar en makespan ni energía); (c) desactivar el apagado del broker mientras el
+  episodio esté en curso.
+- **Criterio:** `finished_cloudlets == n_cloudlets` y `episode_complete=True` en el 100 % de las
+  ventanas de 50 cloudlets, sin truncamientos.
 
 ### P2 — deuda
 
@@ -125,6 +128,9 @@ está inflada ~100× respecto al tiempo simulado.
 
 | Ítem | Qué se hizo | Dónde | Evidencia |
 |---|---|---|---|
+| **SIM-09** energía por `dt` real | `updateEnergyAndSla()` integra `potencia × (clock − clock_prev) / 3600` en vez de asumir 1 s por paso; antes la energía iba ~100× por delante del reloj | `SimulationGateway.java` | diag 50 cloudlets: reloj 73→118 s con energía 11.4→18.5 Wh (~0.078 Wh por 0.5 s) — coherente con el tiempo simulado |
+| **SIM-08b** heartbeat del gateway | Entidad `Heartbeat` que se reprograma cada 0.5 s para que `runFor` no termine la simulación por cola vacía | `SimulationGateway.java` | el reloj avanza 0.5 s por paso (antes 0.00–0.05 s) y el motor ya no se apaga a mitad de ventana |
+| **REPO-11** contexto de build | `.dockerignore` real (2.5 GB → ~1 MB): excluye `.venv`, `data`, `outputs`, `notebooks`, `docs`, `tests`, `java-sim/target` y el material del curso; nota de rebuild en README | `.dockerignore`, `README.md` | `docker build` ya no envía 2.5 GB de contexto; sección "Rebuilding after code changes" |
 | **LOG-09** series TB → CSV | Export automático al terminar cada run: `series_long.csv` (todos los eventos), un CSV ancho por namespace, `text.csv`, `run.json` y copia de `result.json`; sin downsample y sin enmascarar NaN | `tb_export.py`, `train.py` | smoke: 574 eventos/27 tags → `tb_series/smoke/…/{episode,train,buffer,stopper,eval,perf}.csv`; `tests/test_tb_export.py` (7) |
 | **EVAL-04** profundidad en el Pareto | `GROUP_KEYS` incluye `n_hidden_layers`; las celdas ya no mezclan 1 y 2 capas | `analyze_pareto.py` | cabecera imprime "celdas (precisión×device×ancho×profundidad)" |
 | **LOG-04** pérdida/Q por updates | `episode/avg_loss` y `episode/mean_q` dividen por nº de updates; si no hubo updates no se registra | `train.py`, `metrics.py` | episodio 1 del smoke: 0.1321 (= media real de sus 11 updates) frente a 0.0799 antes (×0.59) |
@@ -185,8 +191,9 @@ está inflada ~100× respecto al tiempo simulado.
 1. **Re-correr el sweep:** regenerar `data_h4.parquet` como v2 (11 dims, LPT, split estratificado,
    132 celdas) o conservar el v1 como histórico. **Ahora además** depende de decidir SIM-09 (escala de
    energía), porque cambia todas las magnitudes.
-2. **SIM-09:** ¿se corrige la energía con el `dt` real (magnitudes bajan ~100×) y/o se arregla el ciclo
-   `startSync`/`runFor` para que cada paso sea 1 s?
+2. **Semántica del paso:** hoy el heartbeat avanza el reloj 0.5 s por step (la energía ya es coherente).
+   ¿Se fija 1.0 s por step (heartbeat de 1 s) para que "paso" == "segundo", asumiendo el cambio de escala
+   del reward?
 3. **Reconstruir `java-sim` (SIM-06):** quitar el SLA y la 12.ª dimensión (el build ya está verificado:
    ~1–2 min con Maven y red).
 4. **Hardware objetivo del despliegue:** decide si el eje es `packed_size_mb` (memoria/edge) o latencia

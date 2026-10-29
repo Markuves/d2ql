@@ -48,6 +48,9 @@ class CloudSimEnv(gym.Env):
         self.gateway = None
         self._prev_energy = 0.0  # cumulative energy of the previous step (A1)
         self._supports_episode_complete: bool | None = None
+        self._n_cloudlets = 0
+        self._steps = 0
+        self._max_steps = 0
         self._connect_gateway()
 
     # ------------------------------------------------------------------
@@ -115,12 +118,18 @@ class CloudSimEnv(gym.Env):
             raw = self.sim.reset()
 
         self._prev_energy = 0.0  # A1: each episode's energy delta starts at zero
+        self._n_cloudlets = 0 if not cloudlets else len(cloudlets)
+        self._steps = 0
+        # Hard cap: 1 dispatch per step + drain, with slack. Prevents a hang if
+        # the engine stops producing events mid-window (SIM-10).
+        self._max_steps = max(20 * self._n_cloudlets + 100, 200)
         obs = self._parse_obs(raw)
-        info = {"n_cloudlets": 0 if not cloudlets else len(cloudlets)}
+        info = {"n_cloudlets": self._n_cloudlets}
         return obs, info
 
     def step(self, action: int):
         host_idx = int(action) % N_HOSTS
+        self._steps += 1
 
         # Execute the action in the Java simulator
         raw = self.sim.step(host_idx)
@@ -138,9 +147,19 @@ class CloudSimEnv(gym.Env):
         self._prev_energy = energy
 
         # SIM-08: the episode ends when the last cloudlet finishes, not when the
-        # simulator's event queue drains (that idle tail was ~half the steps).
-        terminated = bool(self._episode_complete())
+        # simulator's event queue drains. Two safety nets keep a run from
+        # hanging when the engine runs out of events before the window is done
+        # (see SIM-10): no running engine and a hard step cap.
+        finished_cloudlets = self._finished_cloudlets()
+        complete = bool(self._episode_complete())
+        sim_running = self._simulation_running()
+        terminated = complete
         truncated = False
+        if not complete:
+            if not sim_running:
+                terminated = truncated = True
+            elif self._steps >= self._max_steps:
+                terminated = truncated = True
 
         info = {
             "cpu_utilizations": cpu_utilizations,
@@ -149,6 +168,10 @@ class CloudSimEnv(gym.Env):
             "makespan": makespan,
             "cost": cost,
             "sim_time": float(self.sim.getSimulationTime()),  # clock AFTER the step
+            "finished_cloudlets": finished_cloudlets,
+            "n_cloudlets": self._n_cloudlets,
+            "episode_complete": complete,
+            "simulation_running": sim_running,
         }
 
         # SIM-05: the env owns the reward (r_t in [-1, 0]); callers just use the
@@ -197,6 +220,20 @@ class CloudSimEnv(gym.Env):
         if self._supports_episode_complete:
             return bool(self.sim.isEpisodeComplete())
         return bool(self.sim.isFinished())
+
+    def _finished_cloudlets(self) -> int:
+        """Cloudlets of the window that already finished (-1 if unsupported)."""
+        try:
+            return int(self.sim.getFinishedCloudletCount())
+        except Exception:  # noqa: BLE001 - old gateway image
+            return -1
+
+    def _simulation_running(self) -> bool:
+        """Whether the CloudSim engine still has events to process."""
+        try:
+            return bool(self.sim.isSimulationRunning())
+        except Exception:  # noqa: BLE001 - old gateway image
+            return True
 
     def _parse_obs(self, raw) -> np.ndarray:
         """Convert the Java observation array to the env's float32 vector.

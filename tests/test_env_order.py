@@ -66,6 +66,12 @@ class FakeSim:
     def isEpisodeComplete(self):
         return True
 
+    def getFinishedCloudletCount(self):
+        return 10
+
+    def isSimulationRunning(self):
+        return True
+
 
 @pytest.fixture
 def stub_env(monkeypatch):
