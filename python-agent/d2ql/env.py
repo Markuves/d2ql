@@ -63,8 +63,8 @@ class CloudSimEnv(gym.Env):
         from py4j.java_gateway import GatewayParameters, JavaGateway
 
         py4j_cfg = self.config.get("py4j") or {}
-        address = py4j_cfg.get("host") or os.environ.get("JAVA_HOST", "java-sim")
-        port = int(py4j_cfg.get("port") or os.environ.get("JAVA_PORT", 25333))
+        address = os.environ.get("JAVA_HOST") or py4j_cfg.get("host", "java-sim")
+        port = int(os.environ.get("JAVA_PORT") or py4j_cfg.get("port", 25333))
         self.gateway = JavaGateway(
             gateway_parameters=GatewayParameters(address=address, port=port)
         )

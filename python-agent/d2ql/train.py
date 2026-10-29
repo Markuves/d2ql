@@ -427,13 +427,38 @@ def run_training(config: dict) -> None:
         plan = _build_native_plan(
             precisions, bits_list, hidden_sizes, layer_counts, max_hidden
         )
+
+        # Sharding / Slicing support for parallel multi-instance execution
+        shard_id = config.get("_shard_id")
+        num_shards = config.get("_num_shards")
+        slice_range = config.get("_slice")
+
+        total_runs = len(plan)
+        if slice_range:
+            try:
+                start_str, end_str = slice_range.split(":")
+                start_idx = int(start_str) if start_str else 0
+                end_idx = int(end_str) if end_str else total_runs
+                plan = plan[start_idx:end_idx]
+                logger.info("Filtered plan with slice %s: %d of %d combinaciones.", slice_range, len(plan), total_runs)
+            except Exception as e:
+                logger.error("Invalid slice range '%s': %s", slice_range, e)
+                raise
+        elif shard_id is not None and num_shards is not None:
+            if num_shards <= 0 or shard_id < 0 or shard_id >= num_shards:
+                raise ValueError(f"Invalid shard configuration: shard_id={shard_id}, num_shards={num_shards}")
+            chunk_size = (total_runs + num_shards - 1) // num_shards
+            start_idx = shard_id * chunk_size
+            end_idx = min(start_idx + chunk_size, total_runs)
+            plan = plan[start_idx:end_idx]
+            logger.info(
+                "Executing Shard %d/%d: indices [%d..%d) (%d of %d combinaciones).",
+                shard_id, num_shards, start_idx, end_idx, len(plan), total_runs
+            )
+
         logger.info(
-            "H4 plan: %d combinaciones (precisión, device, ancho, profundidad): "
-            "%d precisiones × %d anchos × %d profundidades.",
+            "H4 plan: %d combinaciones a ejecutar (precisión, device, ancho, profundidad).",
             len(plan),
-            len(precisions) or len(bits_list),
-            len(hidden_sizes),
-            len(layer_counts),
         )
 
         for seed in seeds:
@@ -944,6 +969,24 @@ def main():
         default="",
         help="Path to checkpoint file to resume training from"
     )
+    parser.add_argument(
+        "--shard-id",
+        type=int,
+        default=None,
+        help="Zero-indexed shard ID for distributed/parallel sweep execution"
+    )
+    parser.add_argument(
+        "--num-shards",
+        type=int,
+        default=None,
+        help="Total number of shards to partition the sweep into"
+    )
+    parser.add_argument(
+        "--slice",
+        type=str,
+        default=None,
+        help="Explicit index slice of combinations to run, e.g. '0:33' or '33:66'"
+    )
     args = parser.parse_args()
 
     config = load_config(args.config)
@@ -964,6 +1007,13 @@ def main():
             logger.error("Checkpoint %s not found. Aborting.", args.resume)
             sys.exit(1)
         config["_resume_path"] = str(resume_path)
+
+    if args.shard_id is not None:
+        config["_shard_id"] = args.shard_id
+    if args.num_shards is not None:
+        config["_num_shards"] = args.num_shards
+    if args.slice is not None:
+        config["_slice"] = args.slice
 
     run_training(config)
 
