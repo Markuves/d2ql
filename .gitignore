@@ -45,3 +45,7 @@ outputs/results/
 .coverage
 htmlcov/
 .ruff_cache/
+
+# Log analyzer
+samples/
+docker-python-agent.log
