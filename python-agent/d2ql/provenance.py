@@ -45,9 +45,30 @@ def git_sha() -> str:
     return "unknown"
 
 
+def _normalize_keys(value):
+    """Return ``value`` with every mapping key recursively turned into a ``str``.
+
+    ``json.dumps(..., sort_keys=True)`` sorts the keys by *comparing* them, so a
+    config that mixes the integer precision key ``32`` with string keys raised
+    ``TypeError: '<' not supported between instances of 'str' and 'int'``. The
+    H4 sweep config does exactly that (``learning_rate_overrides`` and
+    ``capacity.max_hidden_size`` keyed by precision), and because provenance is
+    built after the last episode it killed every H4 run at the end. Stringifying
+    the keys first also makes the hash independent of whether a key arrived as
+    ``32`` or ``"32"``.
+    """
+    if isinstance(value, dict):
+        return {str(k): _normalize_keys(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_normalize_keys(v) for v in value]
+    return value
+
+
 def config_sha256(config: dict) -> str:
     """Stable 16-char hash of the effective run config (override included)."""
-    payload = json.dumps(config, sort_keys=True, default=str, separators=(",", ":"))
+    payload = json.dumps(
+        _normalize_keys(config), sort_keys=True, default=str, separators=(",", ":")
+    )
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()[:16]
 
 

@@ -111,6 +111,60 @@ docker compose up -d
 rebuild. Symptoms of a stale image: a `KeyError: 'datacenter'` in `d2ql/env.py` (that key was removed
 in favour of the fixed 4-host topology) or old line numbers in tracebacks.
 
+See [Fresh images](#fresh-images) before running a long sweep after pulling new code.
+
+### 5. Running the H4 sweep (resumable)
+
+`docker-compose.yml` runs the full 66-cell H4 sweep with `--resume` already wired in:
+
+```bash
+docker compose build --no-cache java-sim python-agent   # see Fresh images
+docker compose up -d --force-recreate
+docker compose logs -f python-agent                     # live progress
+```
+
+* **Progress:** one `Episode n/400` line per episode, one `Sweep H4: running cell <tag> (i/66)`
+  line per cell, and `Sweep H4 summary: N completed, M failed, K skipped` at the end. Per-episode
+  truncation is DEBUG; a single INFO summary appears every 50 episodes.
+* **Per-cell artifacts:** `outputs/checkpoints/h4/<precision>_<device>_h<width>_l<depth>_s<seed>/`
+  (`checkpoint_*.pt`, `result.json`), one upserted row per run in `outputs/results/h4_results.csv`,
+  TensorBoard trees under `outputs/tensorboard/` and `outputs/results/tb_series/`.
+* **Restarting is safe:** a cell counts as done when its `result.json` exists, so re-running the
+  same command after any interruption skips the finished cells and continues with the next one.
+* **If java-sim dies:** capture the evidence *before* recreating anything —
+  `docker compose ps -a` (exit code: 143 = SIGTERM, 137 = SIGKILL, plus `OOMKilled`) and
+  `docker compose cp java-sim:/app/logs ./java-logs` for the GC log and the OOM heap dump.
+
+## Fresh images
+
+A plain `docker compose build` (and `docker compose up --build`) **reuses the layer cache**: Docker
+keeps any layer it considers stale, so an image built weeks ago can keep running silently. That is
+exactly what happened in the 2026-10-29 incident: the running gateway had been built on 2026-08-26,
+before `setSeed` was added to `SimulationGateway` (2026-09-21), so every `setSeed` call failed with
+`Py4JError: An error occurred while calling t.setSeed` while `docker compose up` reported success.
+
+Force a from-scratch build and recreate every container:
+
+```bash
+docker compose build --no-cache java-sim python-agent   # --no-cache is a `build` flag
+docker compose up -d --force-recreate
+```
+
+Notes:
+
+* `--no-cache` belongs to `build`. `docker compose up --build` only rebuilds what Docker thinks is
+  stale, and `docker compose up --no-cache` is **not** a valid flag (the flag is rejected before
+  anything starts).
+* Verify what is actually running — IDs and CREATED must be from this session, and java-sim must
+  reach `(healthy)`:
+  ```bash
+  docker compose images
+  docker compose ps
+  docker compose exec java-sim ls -la /app/logs   # GC log of the JVM that is running now
+  ```
+* Both `d2ql-java-sim` and `d2ql-python-agent` bake the source, so a stale image also means stale
+  Python code (e.g. a fix from the incident branch silently not being exercised).
+
 ---
 
 ## Telemetry and Logging

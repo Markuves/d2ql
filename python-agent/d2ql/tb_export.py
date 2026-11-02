@@ -1,7 +1,7 @@
 """Export TensorBoard event files to tidy CSV time series.
 
-TensorBoard is great for looking at a run and terrible for re-analysing 132 of
-them: the data lives in protobuf event files, one directory per run. This module
+TensorBoard is great for looking at a run and terrible for re-analysing a whole
+sweep of them: the data lives in protobuf event files, one directory per run. This module
 converts each run directory into plain CSV, with these guarantees:
 
 * **No downsampling.** ``EventAccumulator`` is configured with

@@ -157,6 +157,7 @@ corregido: la energía se integra con el `dt` real.
 | **LOG-03** telemetría de eval/despliegue | `eval/*` y `perf/*` al cerrar el run | `metrics.py` | TB del smoke |
 | **EVAL-02** H5 vs H4 | `simulation_time_scale: 0.01` en H5 | `configs/h5_heuristics.yaml` | smoke H5 corre con esa escala |
 | **EVAL-05** semillas | `[42, 41]` → 132 corridas | `configs/h4_native_precision.yaml`, `tests/test_h4_plan.py` | guard en verde |
+| **EVAL-05 (revisado)** una semilla | `[42]` → 66 corridas: el runtime pesa más que la réplica; el config manda y el guard del plan exige 66 | `tests/test_h4_plan.py` | 155 tests en verde |
 | **SIM-02** topología fija | `N_HOSTS = 4` en `env.py`; fuera `n_cloud_hosts` | `env.py`, configs | `tests/test_env_order.py` |
 | **SIM-03** potencia de fuente única | `d2ql/power.py` + `RewardManager` que solo recibe `e_step_max` | `power.py`, `reward.py` | `tests/test_power.py` compara los 4 arrays con el Java |
 | **SIM-04** orden aplicado | LPT por trabajo/PE enviado al gateway en ese orden | `queue.py`, `env.py` | `tests/test_queue.py`, `tests/test_env_order.py` |
@@ -189,7 +190,7 @@ corregido: la energía se integra con el `dt` real.
 ## 6. Decisiones abiertas
 
 1. **Re-correr el sweep:** regenerar `data_h4.parquet` como v2 (11 dims, LPT, split estratificado,
-   132 celdas) o conservar el v1 como histórico. **Ahora además** depende de decidir SIM-09 (escala de
+   66 celdas) o conservar el v1 como histórico. **Ahora además** depende de decidir SIM-09 (escala de
    energía), porque cambia todas las magnitudes.
 2. **Semántica del paso:** hoy el heartbeat avanza el reloj 0.5 s por step (la energía ya es coherente).
    ¿Se fija 1.0 s por step (heartbeat de 1 s) para que "paso" == "segundo", asumiendo el cambio de escala

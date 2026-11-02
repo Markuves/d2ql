@@ -1,0 +1,75 @@
+# Short smoke config used to verify the incident fixes end to end.
+#
+#   PYTHONPATH=python-agent .venv/bin/python python-agent/main.py \
+#       --config configs/smoke_incident.yaml --resume
+#
+# It is the H4 shape reduced to one sweep cell and two episodes, and it keeps the
+# mixed-type keys (integer precision key 32 next to the string key "ternary")
+# that made `config_sha256` raise `TypeError` after the last episode of every run.
+experiment:
+  id: "incident_smoke"
+  hypothesis: "verify the incident fixes"
+  seed: 42
+  seeds: [42]
+
+py4j:
+  host: "localhost"
+  port: 25333
+
+workload:
+  trace_path: "data/workload.csv.gz"
+  episode_length: 50
+  shuffle: false
+  holdout_frac: 0.2
+  simulation_time_scale: 0.01
+
+evaluation:
+  n_episodes: 2
+
+agent:
+  precision: "32"
+  hidden_size: 32
+  n_hidden_layers: 1
+  learning_rate: 0.0005
+  gamma: 0.98
+  target_update_freq: 750
+  batch_size: 64
+  replay_buffer_capacity: 1000
+  replay_buffer_warmup: 32
+  gradient_clip_norm: 10.0
+  epsilon_start: 1.0
+  epsilon_end: 0.05
+  epsilon_decay: 0.995
+  per_alpha: 0.6
+  per_beta_start: 0.4
+  per_beta_end: 1.0
+
+training:
+  n_episodes: 2
+  eval_every_n_episodes: 50
+  checkpoint_dir: "outputs/smoke/checkpoints"
+  tensorboard_dir: "outputs/smoke/tensorboard"
+
+early_stopping:
+  enabled: false
+
+latency:
+  benchmark: false
+
+results:
+  csv_dir: "outputs/smoke/results"
+
+native_precision:
+  enabled: true
+  # str key "ternary" next to the integer key 32: the exact shape that crashed.
+  learning_rate_overrides:
+    ternary: 0.0003
+    32: 0.0005
+  capacity:
+    hidden_sizes: [32]
+    n_hidden_layers: [1]
+    max_hidden_size:
+      32: 1024
+      ternary: 4096
+  precisions:
+    - {precision: 32, device: cpu}

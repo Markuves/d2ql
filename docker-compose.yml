@@ -11,18 +11,32 @@ services:
       - GATEWAY_PORT=25333
     volumes:
       - ./data:/app/data
+      # GC logs + heap dump (see Dockerfile.java). A named volume, not a bind
+      # mount: the container runs as d2ql (uid 999) and a host directory is not
+      # writable by it, which makes -Xlog fail and kills the JVM at startup.
+      # Docker initialises the volume with /app/logs' owner from the image.
+      # Read them with: docker compose cp java-sim:/app/logs ./java-logs
+      - java-logs:/app/logs
     restart: unless-stopped
     networks:
       - d2ql-net
     # health check so python-agent waits for the Py4j gateway to be
-    # actually listening, not just for the container to have started 
+    # actually listening, not just for the container to have started
     healthcheck:
-      test: ["CMD-SHELL", "timeout 1 bash -c 'cat < /dev/null > /dev/tcp/localhost/25333' && echo ok"]
+      # Real connect probe on the gateway port: bash fails the /dev/tcp
+      # redirect when nothing accepts on 25333, and the gateway JVM must still
+      # be the container's main process. 3s (not 1s) so a JVM in a long GC pause
+      # under load is not reported unhealthy and restarted.
+      test:
+        - CMD-SHELL
+        - >-
+          timeout 3 bash -c 'exec 3<>/dev/tcp/127.0.0.1/25333' &&
+          grep -qa gateway.jar /proc/1/cmdline
       interval: 5s
-      timeout: 3s
+      timeout: 5s
       retries: 10
       # start_period gives the JVM time to boot before failures count 
-      start_period: 20s
+      start_period: 30s
     logging:
       driver: json-file
       options:
@@ -69,12 +83,14 @@ services:
     restart: on-failure
     networks:
       - d2ql-net
-    command: ["python", "main.py", "--config", "configs/h4_native_precision.yaml"]
+    command: ["python", "main.py", "--config", "configs/h4_native_precision.yaml", "--resume"]
     logging:
       driver: json-file
       options:
-        max-size: "10m"
-        max-file: "3"
+        # Enough history to survive a 26h/65-restart incident (was 10m x 3,
+        # which discarded the evidence of the previous crash).
+        max-size: "100m"
+        max-file: "5"
 
   tensorboard:
     build:
@@ -114,3 +130,5 @@ networks:
 # named volume declaration for outputs persistence 
 volumes:
   outputs:
+  # java-sim diagnostics: GC logs and the heap dump written on OOM.
+  java-logs:

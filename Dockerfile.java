@@ -31,6 +31,12 @@ COPY --from=builder /build/target/java-sim-1.0.0.jar ./gateway.jar
 # Ensure the non-root user owns the application file 
 RUN chown d2ql:d2ql /app/gateway.jar
 
+# Diagnostics directory, mounted from the `java-logs` volume (docker-compose.yml).
+# It MUST exist and belong to d2ql before the ENTRYPOINT runs: -Xlog is fatal
+# when the log file cannot be opened, so a root-owned directory would stop the
+# JVM from starting instead of merely losing the GC trace.
+RUN mkdir -p /app/logs && chown d2ql:d2ql /app/logs
+
 # Drop privileges before the process starts 
 USER d2ql
 
@@ -56,6 +62,16 @@ EXPOSE 25333
 # -XX:+ExitOnOutOfMemoryError     — crash cleanly on OOM instead of hanging in a
 #                                   degraded state; lets Docker restart policy take over [2][21][22]
 #
+# -Xlog:gc*:file=/app/logs/gc.log — GC trace into the mounted java-logs volume, so a
+#                                   JVM that dies under load leaves evidence instead of
+#                                   nothing (2 unexplained mid-training Py4JNetworkError
+#                                   crashes). Rotated: 5 files x 20 MB.
+#
+# -XX:+HeapDumpOnOutOfMemoryError / -XX:HeapDumpPath=/app/logs/heapdump.hprof
+#                                 — dump the heap to the same mounted volume on OOM,
+#                                   before ExitOnOutOfMemoryError exits the VM, so the
+#                                   allocation pattern that killed java-sim is analysable.
+#
 # --enable-native-access=ALL-UNNAMED — required by CloudSimPlus on Java 21
 ENTRYPOINT ["java", \
   "-XX:+UseContainerSupport", \
@@ -63,5 +79,8 @@ ENTRYPOINT ["java", \
   "-XX:MaxRAMPercentage=75.0", \
   "-XX:+UseG1GC", \
   "-XX:+ExitOnOutOfMemoryError", \
+  "-XX:+HeapDumpOnOutOfMemoryError", \
+  "-XX:HeapDumpPath=/app/logs/heapdump.hprof", \
+  "-Xlog:gc*:file=/app/logs/gc.log:time,uptime,level,tags:filecount=5,filesize=20m", \
   "--enable-native-access=ALL-UNNAMED", \
   "-jar", "gateway.jar"]

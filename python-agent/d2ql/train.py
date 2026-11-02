@@ -1,9 +1,13 @@
 import argparse
+import json
 import logging
 import random
 import sys
+import traceback
+from collections.abc import Callable
 from copy import deepcopy
 from datetime import datetime, timezone
+from functools import partial
 from pathlib import Path
 
 import numpy as np
@@ -71,6 +75,62 @@ def load_config(config_path: str) -> dict:
     return loaded
 
 
+#: SIM-10 caps an episode at a fixed number of steps, so most episodes end
+#: truncated. That is routine: per-episode detail is logged at DEBUG and a single
+#: INFO summary is emitted every TRUNCATION_SUMMARY_EVERY episodes. Logging one
+#: WARNING per episode produced 21k lines (44% of the incident log volume).
+TRUNCATION_SUMMARY_EVERY = 50
+
+
+def _log_truncation(label: str, info: dict, step_count: int | None = None) -> None:
+    """Per-episode truncation detail, at DEBUG (the SIM-10 cap is expected)."""
+    detail = (
+        f"{label} truncated: {info.get('finished_cloudlets', -1)}/"
+        f"{info.get('n_cloudlets', -1)} cloudlets finished"
+    )
+    if step_count is not None:
+        detail += f" | sim_running={info.get('simulation_running')} | steps={step_count}"
+    logger.debug("%s", detail)
+
+
+class TruncationSummary:
+    """Aggregate per-episode truncation into one INFO line per window of episodes."""
+
+    def __init__(self, scope: str, every: int = TRUNCATION_SUMMARY_EVERY):
+        self.scope = scope
+        self.every = max(int(every), 1)
+        self.episodes = 0
+        self.truncated = 0
+        self.finished = 0
+        self.cloudlets = 0
+
+    def add(self, info: dict, truncated: bool) -> None:
+        """Record one episode; emit the window summary once `every` is reached."""
+        self.episodes += 1
+        self.truncated += int(bool(truncated))
+        self.finished += max(int(info.get("finished_cloudlets", -1)), 0)
+        self.cloudlets += max(int(info.get("n_cloudlets", -1)), 0)
+        if self.episodes >= self.every:
+            self.flush()
+
+    def flush(self) -> None:
+        """Log the summary of the window that just ended (no-op when empty)."""
+        if self.episodes == 0:
+            return
+        logger.info(
+            "%s: last %d episodes: %d truncated, mean %.1f/%.0f cloudlets finished",
+            self.scope,
+            self.episodes,
+            self.truncated,
+            self.finished / self.episodes,
+            self.cloudlets / self.episodes,
+        )
+        self.episodes = 0
+        self.truncated = 0
+        self.finished = 0
+        self.cloudlets = 0
+
+
 def _run_heldout_eval(
     env,
     agent,
@@ -102,6 +162,7 @@ def _run_heldout_eval(
     total_steps = 0
     truncated_eval_episodes = 0
     makespans: list[float] = []
+    truncation = TruncationSummary("eval")
 
     for cloudlets in eval_cloudlets:
         obs, _ = env.reset(cloudlets=cloudlets)
@@ -118,13 +179,12 @@ def _run_heldout_eval(
         total_reward += ep_reward
         total_steps += step_count
         makespans.append(float(info.get("makespan", 0.0)))
+        truncation.add(info, truncated)
         if truncated:
             truncated_eval_episodes += 1
-            logger.warning(
-                "Eval episode truncated: %d/%d cloudlets finished",
-                info.get("finished_cloudlets", -1),
-                info.get("n_cloudlets", -1),
-            )
+            _log_truncation("Eval episode", info)
+
+    truncation.flush()
 
     avg_makespan = sum(makespans) / max(len(makespans), 1)
     avg_reward = total_reward / max(n_episodes, 1)
@@ -402,6 +462,111 @@ def _build_native_plan(
     return plan
 
 
+# ---------------------------------------------------------------------------
+# Sweep driver: fault isolation between cells (FIX 2) and resume (FIX 3)
+# ---------------------------------------------------------------------------
+
+#: Artifact that marks a sweep cell as finished. ``save_run_result`` writes it as
+#: the last step of ``_run_one_training`` (after both checkpoints and the CSV
+#: row), so its presence means the cell produced comparable results.
+CELL_ARTIFACT_NAME = "result.json"
+
+
+def _cell_artifact_path(run_config: dict) -> Path:
+    """Path of the result artifact that marks this cell as completed."""
+    return Path(run_config["training"]["checkpoint_dir"]) / CELL_ARTIFACT_NAME
+
+
+def _cell_is_complete(run_config: dict) -> bool:
+    """Whether this cell already wrote a complete (parsable, non-empty) artifact.
+
+    A container killed mid-write leaves a truncated or empty ``result.json``;
+    that cell is *not* complete and must run again.
+    """
+    artifact = _cell_artifact_path(run_config)
+    try:
+        if artifact.stat().st_size == 0:
+            return False
+        with open(artifact) as f:
+            return isinstance(json.load(f), dict)
+    except (OSError, ValueError):
+        return False
+
+
+def _run_sweep(
+    cells: list[tuple[str, dict, Callable[[], None]]],
+    sweep_name: str,
+    resume: bool = False,
+) -> dict:
+    """Run every ``(cell_id, run_config, thunk)`` cell, isolating failures.
+
+    One cell must never take the sweep down: the 66-cell H4 sweep was killed 50
+    times by a single ``config_sha256`` TypeError that escaped ``main()``. Each
+    failure is logged with the cell identity and the full traceback and the
+    sweep continues. ``FileNotFoundError`` (missing workload trace) and
+    non-``Exception`` BaseExceptions such as ``KeyboardInterrupt`` abort
+    instead, because every remaining cell would fail the same way.
+
+    With ``resume`` the cells whose artifact is already complete are skipped, so
+    a restarted container continues where the previous one died.
+    """
+    completed: list[str] = []
+    failed: list[str] = []
+    skipped: list[str] = []
+
+    for index, (cell_id, run_config, thunk) in enumerate(cells, start=1):
+        if resume and _cell_is_complete(run_config):
+            skipped.append(cell_id)
+            logger.info(
+                "Resuming sweep %s: skipping completed cell %s (%d/%d), artifact %s",
+                sweep_name,
+                cell_id,
+                index,
+                len(cells),
+                _cell_artifact_path(run_config),
+            )
+            continue
+        logger.info(
+            "Sweep %s: running cell %s (%d/%d)", sweep_name, cell_id, index, len(cells)
+        )
+        try:
+            thunk()
+        except FileNotFoundError:
+            logger.error(
+                "Sweep %s: cell %s aborted the sweep (missing input file).",
+                sweep_name,
+                cell_id,
+            )
+            raise
+        except Exception:  # noqa: BLE001 - keep the sweep alive, log and continue
+            failed.append(cell_id)
+            logger.error(
+                "Sweep %s: cell %s FAILED, continuing with the next cell.\n%s",
+                sweep_name,
+                cell_id,
+                traceback.format_exc(),
+            )
+            continue
+        completed.append(cell_id)
+
+    logger.info(
+        "Sweep %s summary: %d completed, %d failed, %d skipped%s",
+        sweep_name,
+        len(completed),
+        len(failed),
+        len(skipped),
+        f" | failed: {', '.join(failed)}" if failed else "",
+    )
+    return {
+        "completed": completed,
+        "failed": failed,
+        "skipped": skipped,
+        "n_completed": len(completed),
+        "n_failed": len(failed),
+        "n_skipped": len(skipped),
+    }
+
+
 def run_training(config: dict) -> None:
     # H5 dispatch: traditional load-balancing heuristics (no learning).
     if (config.get("heuristics") or {}).get("enabled"):
@@ -436,6 +601,7 @@ def run_training(config: dict) -> None:
             len(layer_counts),
         )
 
+        cells: list[tuple[str, dict, Callable[[], None]]] = []
         for seed in seeds:
             for name, device, hidden_size, n_layers in plan:
                 bits = precision_bits(name)
@@ -468,10 +634,14 @@ def run_training(config: dict) -> None:
                     n_layers,
                     seed,
                 )
-                _run_one_training(run_config)
+                cells.append((tag, run_config, partial(_run_one_training, run_config)))
+        # FIX 2: a failing cell is logged and skipped instead of killing the
+        # sweep. FIX 3: --resume skips the cells that already finished.
+        _run_sweep(cells, sweep_name="H4", resume=bool(config.get("_resume_sweep")))
         return
 
     # Non-native single-plan path: still replicate the run across seeds (P2).
+    cells = []
     for seed in seeds:
         run_config = deepcopy(config)
         run_config.setdefault("experiment", {})["seed"] = seed
@@ -480,7 +650,10 @@ def run_training(config: dict) -> None:
             run_config["training"]["checkpoint_dir"] = str(base_ckpt / f"seed_{seed}")
             experiment_id = config.get("experiment", {}).get("id", "run")
             run_config["experiment"]["id"] = f"{experiment_id}_s{seed}"
-        _run_one_training(run_config)
+        cells.append(
+            (f"seed_{seed}", run_config, partial(_run_one_training, run_config))
+        )
+    _run_sweep(cells, sweep_name="seeds", resume=bool(config.get("_resume_sweep")))
 
 
 def _run_one_training(config: dict) -> None:
@@ -596,6 +769,7 @@ def _run_one_training(config: dict) -> None:
     steps_total = 0  # C2: accumulate steps across episodes for avg_steps
     stopped_early = False
     final_es_reason = ""
+    truncation = TruncationSummary("training")
 
     for episode in range(n_episodes):
         # Sample next episode workload window from the trace
@@ -643,16 +817,10 @@ def _run_one_training(config: dict) -> None:
 
         agent.decay_epsilon()
         steps_total += step_count  # C2
+        truncation.add(info, truncated)
         if truncated:
             truncated_episodes += 1
-            logger.warning(
-                "Episode %d truncated: %d/%d cloudlets finished | sim_running=%s | steps=%d",
-                episode + 1,
-                info.get("finished_cloudlets", -1),
-                info.get("n_cloudlets", -1),
-                info.get("simulation_running"),
-                step_count,
-            )
+            _log_truncation(f"Episode {episode + 1}", info, step_count)
 
         makespan = info.get("makespan", 0.0)
         energy = info.get("energy", 0.0)
@@ -737,6 +905,7 @@ def _run_one_training(config: dict) -> None:
             eval_window_episodes = 0
 
     # If the loop never ran (n_episodes == 0), treat as a 0-length run.
+    truncation.flush()  # report the trailing partial window (FIX 7)
     episodes_trained = episode + 1 if n_episodes > 0 else 0
     es_result = (
         stopper.result(episodes_trained, stopped_early)
@@ -940,9 +1109,13 @@ def main():
     )
     parser.add_argument(
         "--resume",
-        type=str,
-        default="",
-        help="Path to checkpoint file to resume training from"
+        nargs="?",
+        const="",
+        default=None,
+        help=(
+            "Resume the sweep: skip the cells whose result artifact already "
+            "exists. Pass a checkpoint path to also resume the DDQN weights."
+        )
     )
     args = parser.parse_args()
 
@@ -957,6 +1130,12 @@ def main():
         config["experiment"]["hypothesis"],
         seed
     )
+
+    if args.resume is not None:
+        # FIX 3: a bare --resume (the docker-compose default) only skips the
+        # cells that already finished, so a restart resumes the sweep.
+        config["_resume_sweep"] = True
+        logger.info("Sweep resume enabled: completed cells will be skipped.")
 
     if args.resume:
         resume_path = Path(args.resume)
