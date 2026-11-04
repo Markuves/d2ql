@@ -1,0 +1,100 @@
+# Rehearsal config: TWO of the lightest H4 cells, sized to finish in well under an
+# hour on a single GPU. Use it to prove the pipeline is healthy BEFORE spending
+# the real run on the big computer. It never touches the real sweep artifacts:
+# everything lands under outputs/dryrun/.
+#
+#   docker compose -f docker-compose.yml -f docker-compose.dryrun.yml up -d
+#
+# The two cells are the lightest width/depth (64 x 1 layer) at the two precisions
+# that exercise the GPU code paths the full sweep uses:
+#   - 32/cuda  -> fp32 on CUDA
+#   - 16/cuda  -> fp16 under AMP autocast + GradScaler (the most CUDA-specific path)
+# Do NOT switch these to device: cpu: fp16 has no AMP off CUDA and produces NaN
+# losses on CPU (agent.py only enables autocast when device == cuda).
+experiment:
+  id: "dryrun_2cells"
+  hypothesis: "rehearsal"
+  seed: 42
+  seeds: [42]
+
+py4j:
+  host: "java-sim"
+  port: 25333
+
+workload:
+  trace_path: "data/workload.csv.gz"
+  episode_length: 50
+  shuffle: false
+  holdout_frac: 0.2
+  simulation_time_scale: 0.01
+
+# Small held-out evaluation so the quality metrics are produced (and the
+# truncation summaries exercised) without eating the time budget.
+evaluation:
+  n_episodes: 5
+
+agent:
+  precision: "32"          # overridden per cell from native_precision.precisions
+  hidden_size: 64          # overridden per cell from native_precision.capacity
+  n_hidden_layers: 1       # overridden per cell from native_precision.capacity
+  learning_rate: 0.0005
+  gamma: 0.98
+  target_update_freq: 750
+  batch_size: 64
+  replay_buffer_capacity: 100_000
+  replay_buffer_warmup: 2000
+  gradient_clip_norm: 10.0
+  epsilon_start: 1.0
+  epsilon_end: 0.05
+  epsilon_decay: 0.995
+  per_alpha: 0.6
+  per_beta_start: 0.4
+  per_beta_end: 1.0
+
+training:
+  # THE ONE KNOB for the time budget: ~5 s/episode (dominated by the 1100 Py4J
+  # steps, not by the GPU math), so 200 episodes is ~17-20 min per cell, i.e.
+  # ~35-40 min for both cells including eval + benchmarks. Lower it if the
+  # machine turns out slower.
+  n_episodes: 200
+  eval_every_n_episodes: 50
+  checkpoint_dir: "outputs/dryrun/checkpoints"
+  tensorboard_dir: "outputs/dryrun/tensorboard"
+
+# Off on purpose: both cells must run their full budget so the rehearsal has a
+# predictable duration and always reaches cell 2.
+early_stopping:
+  enabled: false
+
+# Reduced but not disabled: it still exercises the deployment-benchmark code path
+# that the real sweep runs per cell, at a fraction of the cost.
+latency:
+  benchmark: true
+  n_samples: 20
+  warmup: 5
+  throughput_batch_sizes: [1, 64]
+  throughput_batch_size: 64
+  throughput_n_batches: 5
+
+results:
+  csv_dir: "outputs/dryrun/results"
+
+native_precision:
+  enabled: true
+  quantize_activations: true
+  precisions:
+    - {precision: 32, device: cuda, label: fp32-gpu}
+    - {precision: 16, device: cuda, label: fp16-gpu}
+  # Mixed int/str keys on purpose: this is the shape that crashed config_sha256
+  # (Fix 1), so the rehearsal re-proves it end to end.
+  learning_rate_overrides:
+    ternary: 0.0003
+    16: 0.0003
+    32: 0.0005
+  capacity:
+    hidden_sizes: [64]
+    n_hidden_layers: [1]
+    max_hidden_size:
+      32: 2048
+      16: 4096
+      ternary: 4096

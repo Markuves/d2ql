@@ -1,0 +1,22 @@
+# Keep text files at LF on every platform.
+#
+# Why this matters: on Windows, Git for Windows defaults to core.autocrlf=true,
+# which checks text files out with CRLF. python-agent/entrypoint.sh is the
+# container ENTRYPOINT, so a CRLF checkout makes the container die at startup
+# with "/bin/sh^M: bad interpreter: No such file or directory" — a clone that
+# looks fine but cannot run. Forcing LF on checkout removes that trap.
+* text=auto eol=lf
+
+# Binary artifacts: never touch their line endings.
+*.gz binary
+*.gzip binary
+*.parquet binary
+*.pt binary
+*.pth binary
+*.prof binary
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.ico binary
+*.pdf binary

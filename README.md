@@ -75,6 +75,22 @@ docker run --rm --gpus all nvidia/cuda:12.4.1-base-ubuntu22.04 nvidia-smi
 
 ## Getting Started
 
+### 0. Get the workload trace (once, required)
+
+`data/` is gitignored, so a fresh clone has **no trace** and nothing can start: every config reads
+`data/workload.csv.gz`. Download it (≈440 MB) with exactly that filename:
+
+```powershell
+# Windows PowerShell
+New-Item -ItemType Directory -Force data | Out-Null
+Invoke-WebRequest -Uri "https://github.com/Azure/AzurePublicDataset/releases/download/dataset-v2/trace_data_vmtable_vmtable.csv.gz" -OutFile "data\workload.csv.gz"
+```
+
+```bash
+# Linux / macOS — the repo script downloads the same URL under a different name
+python3 scripts/download_azure.py && mv data/trace_data_vmtable_vmtable.csv.gz data/workload.csv.gz
+```
+
 ### 1. Build and Start the Entire System
 To compile the Java gateway, pull the Python dependencies, and run the integration test suite, execute:
 

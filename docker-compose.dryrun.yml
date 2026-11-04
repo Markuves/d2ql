@@ -1,0 +1,13 @@
+# Rehearsal override: runs the TWO-cell dry-run config instead of the 66-cell H4
+# sweep, so a full pipeline check finishes inside an hour.
+#
+# Usage:
+#   docker compose -f docker-compose.yml -f docker-compose.dryrun.yml up -d
+#   docker compose -f docker-compose.yml -f docker-compose.dryrun.yml logs -f python-agent
+#
+# Everything else (GPU requests, volumes, --resume) is inherited from
+# docker-compose.yml; the artifacts land under outputs/dryrun/, never in the real
+# outputs/checkpoints/h4 tree that the full sweep resumes from.
+services:
+  python-agent:
+    command: ["python", "main.py", "--config", "configs/dryrun_2cells.yaml", "--resume"]
